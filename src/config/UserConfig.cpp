@@ -27,6 +27,8 @@ void UserConfig::sanitizeSettings() {
         BATTERY_CHARGE_THRESHOLD_MIN, BATTERY_CHARGE_THRESHOLD_MAX);
     _settings.fullBatteryV = constrain(_settings.fullBatteryV,
         BATTERY_FULL_VOLTAGE_MIN, BATTERY_FULL_VOLTAGE_MAX);
+    _settings.adcDividerRatio = constrain(_settings.adcDividerRatio,
+        BATTERY_ADC_DIVIDER_MIN, BATTERY_ADC_DIVIDER_MAX);
 }
 
 bool UserConfig::parseJson(const String& json) {
@@ -119,6 +121,7 @@ bool UserConfig::parseJson(const String& json) {
     _settings.batteryModel = doc["batt_model"] | BATTERY_MODEL_LIPO;
     _settings.chargeThresholdV = doc["charge_thresh_v"] | BATTERY_CHARGE_THRESHOLD_DEFAULT;
     _settings.fullBatteryV = doc["full_battery_v"] | BATTERY_FULL_VOLTAGE_DEFAULT;
+    _settings.adcDividerRatio = doc["adc_divider"] | BATTERY_ADC_DIVIDER_DEFAULT;
 
     _settings.gpsTimeEnabled     = doc["gps_time"]     | true;
     _settings.gpsLocationEnabled = doc["gps_location"] | false;
@@ -200,6 +203,7 @@ String UserConfig::serializeToJson() {
     doc["batt_model"]   = _settings.batteryModel;
     doc["charge_thresh_v"] = _settings.chargeThresholdV;
     doc["full_battery_v"]  = _settings.fullBatteryV;
+    doc["adc_divider"]     = _settings.adcDividerRatio;
 
     doc["gps_time"]     = _settings.gpsTimeEnabled;
     doc["gps_location"] = _settings.gpsLocationEnabled;

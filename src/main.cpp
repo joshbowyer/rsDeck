@@ -948,6 +948,26 @@ static void handleSerialLineCommand(const char* line) {
             sendDiagnosticLiteLinkProof(line + 1);
             break;
         }
+        case 'B': {
+            const char* p = line + 1;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) {
+                Serial.println("[SERIAL] usage: B<ratio>, for example B2.15 (see 'b' for the current value + calibration formula)");
+                return;
+            }
+            char* end = nullptr;
+            float ratio = strtof(p, &end);
+            if (end == p || ratio < BATTERY_ADC_DIVIDER_MIN || ratio > BATTERY_ADC_DIVIDER_MAX) {
+                Serial.printf("[SERIAL] invalid ratio (must be %.1f..%.1f)\n",
+                    BATTERY_ADC_DIVIDER_MIN, BATTERY_ADC_DIVIDER_MAX);
+                return;
+            }
+            powerMgr.setAdcDividerRatio(ratio);
+            userConfig.settings().adcDividerRatio = ratio;
+            userConfig.save(sdStore, flash);
+            Serial.printf("[SERIAL] adc_divider_ratio set to %.4f (saved)\n", ratio);
+            break;
+        }
         default:
             Serial.printf("[SERIAL] unknown line command '%c'\n", line[0]);
             break;
@@ -955,9 +975,32 @@ static void handleSerialLineCommand(const char* line) {
 }
 
 static void printSerialHelp() {
-    Serial.println("[SERIAL] commands: ? help | a announce | t raw-test | d diag | r rssi | i irq | p tx-power-cycle | m min-power | q iq | +/- freq");
-    Serial.println("[SERIAL] line commands: F<hz> exact-frequency | P<dBm> exact-tx-power | L<len> [dest_hash] LXMF test");
+    Serial.println("[SERIAL] commands: ? help | a announce | t raw-test | d diag | r rssi | i irq | p tx-power-cycle | m min-power | q iq | b battery | +/- freq");
+    Serial.println("[SERIAL] line commands: F<hz> exact-frequency | P<dBm> exact-tx-power | L<len> [dest_hash] LXMF test | B<ratio> set-adc-divider-ratio");
     Serial.println("[SERIAL] lite relay diag: H<len> [dest] Header2 data | J [dest] linkreq | K<ctx_hex> link-data | Y<ctx_hex> link-proof");
+}
+
+static void onHotkeyBatteryDiag() {
+    int raw = powerMgr.batteryRawAdc();
+    float ratio = powerMgr.adcDividerRatio();
+    float v = powerMgr.batteryVoltage();
+    int pct = powerMgr.batteryPercent();
+    bool charging = powerMgr.isCharging();
+    float rawMv = (raw / 4095.0f) * 3300.0f;  // raw ADC as mV, BEFORE divider scaling
+
+    Serial.println("=== BATTERY DIAGNOSTIC ===");
+    Serial.printf("raw_adc=%d  raw_mv=%.1f  divider_ratio=%.4f\n", raw, rawMv, ratio);
+    Serial.printf("voltage=%.3fV  percent=%d%%  charging=%s\n",
+        v, pct, charging ? "yes" : "no");
+    Serial.println("Calibrate: measure the battery with a multimeter (ideally with");
+    Serial.println("USB disconnected), then compute + set the correct ratio:");
+    if (raw > 0) {
+        Serial.printf("  divider_ratio = measured_mv / %.1f\n", rawMv);
+        Serial.println("  Then set it with:  B<ratio>   e.g. B2.15");
+    } else {
+        Serial.println("  (raw_adc is 0 - can't compute a ratio right now)");
+    }
+    Serial.println("==========================");
 }
 
 static void handleSerialCommands() {
@@ -986,7 +1029,7 @@ static void handleSerialCommands() {
         }
 
         if (c == '\r' || c == '\n' || c == ' ' || c == '\t') continue;
-        if (c == 'F' || c == 'P' || c == 'L' || c == 'H' || c == 'J' || c == 'K' || c == 'Y') {
+        if (c == 'F' || c == 'P' || c == 'L' || c == 'H' || c == 'J' || c == 'K' || c == 'Y' || c == 'B') {
             lineActive = true;
             lineLen = 0;
             line[lineLen++] = c;
@@ -1027,6 +1070,9 @@ static void handleSerialCommands() {
             case 'q':
             case 'Q':
                 toggleDiagnosticInvertIQ();
+                break;
+            case 'b':
+                onHotkeyBatteryDiag();
                 break;
             case '+':
             case '=':
@@ -1547,6 +1593,7 @@ void setup() {
     powerMgr.setBatteryModel(userConfig.settings().batteryModel);
     powerMgr.setChargeThreshold(userConfig.settings().chargeThresholdV);
     powerMgr.setFullBatteryVoltage(userConfig.settings().fullBatteryV);
+    powerMgr.setAdcDividerRatio(userConfig.settings().adcDividerRatio);
 
 
 

@@ -611,7 +611,7 @@ void LvSettingsScreen::buildItems() {
                 char buf[8]; snprintf(buf, sizeof(buf), "%.2fV", v / 100.0f); return String(buf);
             }, 380, 430, 1});
         idx++;
-        _items.push_back({"Full Voltage", SettingType::INTEGER,
+        _items.push_back({"Full Threshold", SettingType::INTEGER,
             [&s]() { return (int)roundf(s.fullBatteryV * 100); },
             [&s](int v) { s.fullBatteryV = v / 100.0f; },
             [](int v) -> String {
