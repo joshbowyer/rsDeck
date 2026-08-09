@@ -184,6 +184,12 @@ private:
     int _wifiPickerIdx = 0;
     size_t _wifiTargetSlot = 0;
     bool _wifiScanActive = false;
+    // Throttled live-value refresh (Voltage / Estimated Charge readonly
+    // rows) while sitting on the item list - without this, those labels
+    // only update on navigation/edit events and can show a stale snapshot
+    // (e.g. a transient boot-time reading) indefinitely if the user just
+    // stays on the screen watching it.
+    unsigned long _lastReadonlyRefresh = 0;
 
     // Reboot-required tracking
     bool _rebootNeeded = false;
