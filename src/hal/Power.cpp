@@ -55,8 +55,17 @@ void Power::begin() {
 float Power::batteryVoltage() const {
     // T-Deck Plus: voltage divider on GPIO 4
     int raw = analogRead(BAT_ADC_PIN);
-    // Voltage divider: 2x ratio, 3.3V reference, 12-bit ADC
-    return (raw / 4095.0f) * 3.3f * 2.0f;
+    // Voltage divider ratio, 3.3V reference, 12-bit ADC. Stock hardware is
+    // ~2.0x; aftermarket/extended battery packs can be wired through a
+    // different sense-line divider network, so this is user-calibratable
+    // via setAdcDividerRatio() rather than hardcoded. Calibrate with a
+    // multimeter on the actual battery terminals:
+    //   correct_ratio = measured_mv / raw_mv_at_current_ratio * current_ratio
+    return (raw / 4095.0f) * 3.3f * _adcDividerRatio;
+}
+
+int Power::batteryRawAdc() const {
+    return analogRead(BAT_ADC_PIN);
 }
 
 int Power::batteryPercent() const {
@@ -103,6 +112,10 @@ void Power::setChargeThreshold(float v)   {
 
 void Power::setFullBatteryVoltage(float v) {
     _fullBatteryV = v;
+}
+
+void Power::setAdcDividerRatio(float ratio) {
+    _adcDividerRatio = ratio;
 }
 
 

@@ -21,12 +21,28 @@ constexpr uint8_t BATTERY_DISPLAY_PERCENT = 0;
 constexpr uint8_t BATTERY_DISPLAY_BAR = 1;
 constexpr uint8_t BATTERY_MODEL_LIPO = 0;
 constexpr uint8_t BATTERY_MODEL_LINEAR = 1;
-constexpr float BATTERY_CHARGE_THRESHOLD_DEFAULT = 4.0f;
+// 4.18V, not the 4.2V absolute LiPo max - actively charging cells commonly
+// sit in the high-4.1/low-4.2 range well before topping out, so a threshold
+// right at 4.2 would misclassify a nearly-full charging cell as
+// "discharging". Previously 4.0f, which misclassified anything >=80% SoC as
+// actively charging even when just resting on battery.
+constexpr float BATTERY_CHARGE_THRESHOLD_DEFAULT = 4.18f;
 constexpr float BATTERY_FULL_VOLTAGE_DEFAULT = 3.9f;
 constexpr float BATTERY_CHARGE_THRESHOLD_MIN = 3.80f;
 constexpr float BATTERY_CHARGE_THRESHOLD_MAX = 4.30f;
 constexpr float BATTERY_FULL_VOLTAGE_MIN = 3.50f;
 constexpr float BATTERY_FULL_VOLTAGE_MAX = 4.20f;
+// ADC voltage-divider ratio for the battery-sense pin. Was hardcoded to
+// 2.0f in Power.cpp (matches the stock T-Deck Plus battery's sense-line
+// wiring) — aftermarket/extended battery packs can be wired through a
+// different physical divider network on their sense connection, which no
+// amount of curve/offset tuning (fullBatteryV, chargeThresholdV) can
+// correct, since those only reshape an already-correct voltage reading.
+// Derive the right value the same way as a multimeter-based ADC
+// calibration: measured_mv / (raw_computed_mv_at_2.0x_ratio) * 2.0.
+constexpr float BATTERY_ADC_DIVIDER_DEFAULT = 2.0f;
+constexpr float BATTERY_ADC_DIVIDER_MIN = 1.0f;
+constexpr float BATTERY_ADC_DIVIDER_MAX = 4.0f;
 
 struct TCPEndpoint {
     String host;
@@ -74,6 +90,7 @@ struct UserSettings {
     uint8_t batteryModel = BATTERY_MODEL_LIPO;
     float chargeThresholdV = BATTERY_CHARGE_THRESHOLD_DEFAULT;
     float fullBatteryV = BATTERY_FULL_VOLTAGE_DEFAULT;
+    float adcDividerRatio = BATTERY_ADC_DIVIDER_DEFAULT;
 
     // Keyboard
     uint8_t keyboardBrightness = 100; // Percentage 0-100 (0 = off)
