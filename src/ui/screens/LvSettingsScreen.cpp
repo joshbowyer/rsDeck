@@ -1247,6 +1247,23 @@ void LvSettingsScreen::refreshUI() {
         if (_view == SettingsView::ITEM_LIST) rebuildItemList();
     }
 
+    // Periodically refresh live readonly rows (Voltage, Estimated Charge)
+    // while sitting on the item list, so they don't show a stale snapshot
+    // from whenever the screen was last entered/edited. Skip while any
+    // edit mode is active so we don't clobber an in-progress "< Bar >"-
+    // style edit display.
+    if (_view == SettingsView::ITEM_LIST && !_editing && !_textEditing && !_freqEditing) {
+        unsigned long now = millis();
+        if (now - _lastReadonlyRefresh >= 1000) {
+            _lastReadonlyRefresh = now;
+            bool hasReadonly = false;
+            for (auto& item : _items) {
+                if (item.type == SettingType::READONLY) { hasReadonly = true; break; }
+            }
+            if (hasReadonly) rebuildItemList();
+        }
+    }
+
     if (_view != SettingsView::WIFI_PICKER || !_wifiScanActive) return;
     if (!WiFiInterface::isScanComplete()) return;
 
