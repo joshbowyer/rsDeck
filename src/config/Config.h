@@ -31,6 +31,15 @@
 #define WIFI_AP_PORT        4242
 #define WIFI_AP_PASSWORD    "ratspeak"
 
+// --- Branding ---
+// Text shown in the top status bar. Override locally via
+// platformio_override.ini (gitignored, never touches tracked source) with:
+//   build_flags = -DRSDECK_BRAND_TEXT='"YourTextHere"'
+// Left at the project default here so upstream builds/PRs always retain it.
+#ifndef RSDECK_BRAND_TEXT
+#define RSDECK_BRAND_TEXT "Ratspeak.org"
+#endif
+
 // --- Storage Paths ---
 #define PATH_IDENTITY       "/identity/identity.key"
 #define PATH_IDENTITY_BAK   "/identity/identity.key.bak"
