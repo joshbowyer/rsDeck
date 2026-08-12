@@ -73,6 +73,29 @@ public:
     bool isAttemptInFlight() const { return _state != State::IDLE; }
     const char* stateName() const;
 
+    // Diagnostic counters (RAM-only, no persistence; reset on boot).
+    // Used to disambiguate two failure hypotheses for periodic GPS
+    // telemetry sends: RF-out-of-range vs GPS-fix-staleness-gate mismatch.
+    struct Counters {
+        uint32_t ticksFired;        // checkPeriodicSend() interval met → attempted act
+        uint32_t refusedNoFix;      // sendNow() refused: !hasLocationFix()
+        uint32_t refusedStale;      // sendNow() refused: fix age > FRESH_FIX_MAX_AGE_MS
+        uint32_t discoveryAborted;  // WAIT_IDENTITY/WAIT_PATH timed out before SENDING
+        uint32_t txAccepted;        // buildAndSendSnapshot(): packet.send() succeeded
+    };
+    Counters counters() const {
+        return {
+            _ticksFired,
+            _refusedNoFix,
+            _refusedStale,
+            _discoveryAborted,
+            _txAccepted,
+        };
+    }
+
+    // Serial command 'V' handler — prints one-line counter + state dump.
+    void printStatus() const;
+
     // Privacy gate threshold (ms). 30 s per the rsDeck #64 spec.
     static constexpr uint32_t FRESH_FIX_MAX_AGE_MS = 30000UL;
     static constexpr uint8_t  DISCOVERY_MAX_ATTEMPTS = 10;
@@ -130,6 +153,13 @@ private:
     // every loop() iteration — the next attempt is scheduled at the
     // configured interval from this tick.
     unsigned long _lastPeriodicSendMs = 0;
+
+    // ----- diagnostic counters (RAM-only; see Counters above) -----
+    uint32_t _ticksFired       = 0;
+    uint32_t _refusedNoFix     = 0;
+    uint32_t _refusedStale     = 0;
+    uint32_t _discoveryAborted = 0;
+    uint32_t _txAccepted       = 0;
 
     // Cheap sanity: snapshot read of GPS -> doubles
     struct LocSample {
