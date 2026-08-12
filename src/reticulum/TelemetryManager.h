@@ -118,6 +118,13 @@ private:
     // identically between on-demand and periodic paths.
     void checkPeriodicSend();
 
+    // One-shot diagnostic log for why checkPeriodicSend() isn't arming
+    // (cfg unbound / toggle off / interval 0). Logs once per cause change
+    // instead of spamming every loop() tick, so "why isn't periodic
+    // firing?" is answerable from the serial console without guessing.
+    void _logPeriodicSkipOnce(const char* reason);
+    bool _periodicSkipLogged = false;
+
     // Periodic-send bookkeeping. _lastPeriodicSendMs is updated *before*
     // sendNow() so a refused send (e.g. stale fix) does not retry on
     // every loop() iteration — the next attempt is scheduled at the
