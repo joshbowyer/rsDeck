@@ -372,18 +372,44 @@ void LvHomeScreen::refreshUI() {
 #if HAS_GPS
     bool gpsOn = _cfg && _cfg->settings().gpsTimeEnabled;
     if (_gps && gpsOn) {
-        bool hasFix = _gps->hasLocationFix();
-        uint32_t ageMs = _gps->fixAgeMs();
-        bool everFixed = (ageMs != UINT32_MAX);
-        bool stale = everFixed && (ageMs > 60000);
+        // Sticky checkpoint counter (see LvHomeScreen.h comment). This is
+        // deliberately decoupled from GPSManager::fixAgeMs(), which resets
+        // on every ~1Hz NMEA sentence and would otherwise make the UI
+        // jitter between small values every refresh.
+        static constexpr unsigned long CHECK_WINDOW_MS = 30000; // 30s per spec
+        bool receivingNow = _gps->hasLocationFix();
+        unsigned long nowMs = millis();
+
+        if (receivingNow && !_gpsCheckpointSet) {
+            // First fix ever, or first fix after having gone fully idle —
+            // start a fresh 0s..30s cycle.
+            _gpsCheckpointMs = nowMs;
+            _gpsCheckpointSet = true;
+        }
+
+        unsigned long ageMs = _gpsCheckpointSet ? (nowMs - _gpsCheckpointMs) : 0;
+        if (_gpsCheckpointSet && ageMs >= CHECK_WINDOW_MS) {
+            if (receivingNow) {
+                // Checkpoint reached and still receiving -> reset to FIX 0s.
+                _gpsCheckpointMs = nowMs;
+                ageMs = 0;
+            }
+            // else: not receiving -> leave checkpoint alone; ageMs keeps
+            // growing past 30s uninterrupted (STALE 31s, 32s, ...).
+        }
+
+        bool everFixed = _gpsCheckpointSet;
+        bool stale = everFixed && (ageMs >= CHECK_WINDOW_MS);
         String status;
         uint32_t color;
         if (!everFixed) {
             status = "NO FIX";
             color = Theme::TEXT_MUTED;
-        } else if (hasFix && !stale) {
+        } else if (!stale) {
             status = "FIX";
-            if (_gps->satellites() > 0) status += " " + String(_gps->satellites()) + "s";
+            if (_gps->satellites() > 0) {
+                status += " (" + String(_gps->satellites()) + " sat)";
+            }
             color = Theme::SUCCESS;
         } else {
             status = "STALE";
@@ -399,7 +425,7 @@ void LvHomeScreen::refreshUI() {
         }
         lv_label_set_text(_lblLinks, status.c_str());
         lv_obj_set_style_text_color(_lblLinks, lv_color_hex(color), 0);
-        uint32_t border = hasFix && !stale ? Theme::SUCCESS : (everFixed ? Theme::WARNING_CLR : Theme::BORDER);
+        uint32_t border = (everFixed && !stale) ? Theme::SUCCESS : (everFixed ? Theme::WARNING_CLR : Theme::BORDER);
         setPanelTone(_statLinks, gpsOn ? Theme::PRIMARY_SUBTLE : Theme::BG_ELEVATED, border);
     } else {
         lv_label_set_text(_lblLinks, gpsOn ? "ON" : "OFF");

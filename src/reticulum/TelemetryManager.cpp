@@ -172,6 +172,12 @@ bool TelemetryManager::hasFreshFix() const {
 #endif
 }
 
+void TelemetryManager::_logPeriodicSkipOnce(const char* reason) {
+    if (_periodicSkipLogged) return;
+    _periodicSkipLogged = true;
+    Serial.printf("[TELEMETRY] periodic disabled: %s\n", reason);
+}
+
 void TelemetryManager::checkPeriodicSend() {
     // Configuration gate. All four conditions must hold for a periodic
     // tick to fire:
@@ -184,11 +190,21 @@ void TelemetryManager::checkPeriodicSend() {
     // sendNow() re-reads _cfg->settings() on every call and enforces its
     // own privacy gate (fresh fix ≤ FRESH_FIX_MAX_AGE_MS); we do NOT
     // re-implement that gate here so the two paths cannot drift.
-    if (!_cfg) return;
+    if (!_cfg) {
+        _logPeriodicSkipOnce("cfg not bound");
+        return;
+    }
     const UserSettings& s = _cfg->settings();
-    if (!s.gpsTelemetryEnabled) return;
+    if (!s.gpsTelemetryEnabled) {
+        _logPeriodicSkipOnce("gpsTelemetryEnabled=false");
+        return;
+    }
     const int intervalS = s.gpsTelemetryIntervalS;
-    if (intervalS <= 0) return;
+    if (intervalS <= 0) {
+        _logPeriodicSkipOnce("gpsTelemetryIntervalS<=0 (Off)");
+        return;
+    }
+    _periodicSkipLogged = false; // config is valid; re-arm the one-shot skip log
 
     const unsigned long intervalMs = (unsigned long)intervalS * 1000UL;
     if (millis() - _lastPeriodicSendMs < intervalMs) return;
