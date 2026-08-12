@@ -29,6 +29,26 @@ void UserConfig::sanitizeSettings() {
         BATTERY_FULL_VOLTAGE_MIN, BATTERY_FULL_VOLTAGE_MAX);
     _settings.adcDividerRatio = constrain(_settings.adcDividerRatio,
         BATTERY_ADC_DIVIDER_MIN, BATTERY_ADC_DIVIDER_MAX);
+
+    // GPS telemetry hub hash must be exactly 32 hex chars; otherwise reset
+    // to the default Lyra collector hash. Empty / malformed values would
+    // make TelemetryManager refuse every send anyway, but persisting a
+    // broken hash causes silent UI confusion.
+    if (_settings.gpsTelemetryHubHash.length() != UserSettings::GPS_TELEMETRY_HUB_HASH_LEN) {
+        _settings.gpsTelemetryHubHash = UserSettings::GPS_TELEMETRY_DEFAULT_HUB_HASH;
+    } else {
+        bool allHex = true;
+        for (size_t i = 0; i < UserSettings::GPS_TELEMETRY_HUB_HASH_LEN; i++) {
+            char c = _settings.gpsTelemetryHubHash.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                allHex = false;
+                break;
+            }
+        }
+        if (!allHex) {
+            _settings.gpsTelemetryHubHash = UserSettings::GPS_TELEMETRY_DEFAULT_HUB_HASH;
+        }
+    }
 }
 
 bool UserConfig::parseJson(const String& json) {
@@ -129,6 +149,10 @@ bool UserConfig::parseJson(const String& json) {
     _settings.timezoneSet        = doc["tz_set"]       | false;
     _settings.use24HourTime      = doc["time_24h"]     | false;
 
+    // GPS telemetry (issue #64) — opt-in position sharing to a hub.
+    _settings.gpsTelemetryEnabled = doc["gps_telemetry_enabled"] | false;
+    _settings.gpsTelemetryHubHash = doc["gps_telemetry_hub"]      | UserSettings::GPS_TELEMETRY_DEFAULT_HUB_HASH;
+
     _settings.audioEnabled = doc["audio_on"]  | true;
     _settings.audioVolume  = doc["audio_vol"] | 80;
 
@@ -210,6 +234,10 @@ String UserConfig::serializeToJson() {
     doc["tz_idx"]       = _settings.timezoneIdx;
     doc["tz_set"]       = _settings.timezoneSet;
     doc["time_24h"]     = _settings.use24HourTime;
+
+    // GPS telemetry (issue #64) — opt-in position sharing to a hub.
+    doc["gps_telemetry_enabled"] = _settings.gpsTelemetryEnabled;
+    doc["gps_telemetry_hub"]      = _settings.gpsTelemetryHubHash;
 
     doc["audio_on"]  = _settings.audioEnabled;
     doc["audio_vol"] = _settings.audioVolume;

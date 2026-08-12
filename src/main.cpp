@@ -47,6 +47,7 @@
 #include "reticulum/AnnounceManager.h"
 #include "reticulum/LXMFManager.h"
 #include "reticulum/IdentityManager.h"
+#include "reticulum/TelemetryManager.h"
 #include "transport/LoRaInterface.h"
 #include "transport/WiFiInterface.h"
 #include <WiFiMulti.h>
@@ -112,6 +113,7 @@ UserConfig userConfig;
 Power powerMgr;
 AudioNotify audio;
 IdentityManager identityMgr;
+TelemetryManager telemetryManager;
 #if HAS_GPS
 GPSManager gps;
 #endif
@@ -968,6 +970,11 @@ static void handleSerialLineCommand(const char* line) {
             Serial.printf("[SERIAL] adc_divider_ratio set to %.4f (saved)\n", ratio);
             break;
         }
+        case 'G': {
+            // G<32hex>  set telemetry collector hub hash (session only)
+            telemetryManager.setHubHashHex(line + 1);
+            break;
+        }
         default:
             Serial.printf("[SERIAL] unknown line command '%c'\n", line[0]);
             break;
@@ -975,9 +982,10 @@ static void handleSerialLineCommand(const char* line) {
 }
 
 static void printSerialHelp() {
-    Serial.println("[SERIAL] commands: ? help | a announce | t raw-test | d diag | r rssi | i irq | p tx-power-cycle | m min-power | q iq | b battery | +/- freq");
-    Serial.println("[SERIAL] line commands: F<hz> exact-frequency | P<dBm> exact-tx-power | L<len> [dest_hash] LXMF test | B<ratio> set-adc-divider-ratio");
+    Serial.println("[SERIAL] commands: ? help | a announce | t raw-test | d diag | r rssi | i irq | p tx-power-cycle | m min-power | q iq | b battery | g telemetry-send | +/- freq");
+    Serial.println("[SERIAL] line commands: F<hz> exact-frequency | P<dBm> exact-tx-power | L<len> [dest_hash] LXMF test | B<ratio> set-adc-divider-ratio | G<32hex> telemetry-hub");
     Serial.println("[SERIAL] lite relay diag: H<len> [dest] Header2 data | J [dest] linkreq | K<ctx_hex> link-data | Y<ctx_hex> link-proof");
+    telemetryManager.printHelp();
 }
 
 static void onHotkeyBatteryDiag() {
@@ -1029,7 +1037,7 @@ static void handleSerialCommands() {
         }
 
         if (c == '\r' || c == '\n' || c == ' ' || c == '\t') continue;
-        if (c == 'F' || c == 'P' || c == 'L' || c == 'H' || c == 'J' || c == 'K' || c == 'Y' || c == 'B') {
+        if (c == 'F' || c == 'P' || c == 'L' || c == 'H' || c == 'J' || c == 'K' || c == 'Y' || c == 'B' || c == 'G') {
             lineActive = true;
             lineLen = 0;
             line[lineLen++] = c;
@@ -1073,6 +1081,9 @@ static void handleSerialCommands() {
                 break;
             case 'b':
                 onHotkeyBatteryDiag();
+                break;
+            case 'g':
+                telemetryManager.handleSerial('g', nullptr);
                 break;
             case '+':
             case '=':
@@ -1402,6 +1413,26 @@ void setup() {
     lvBootScreen.setProgress(0.75f, "LXMF ready");
     // (LVGL boot renders via lv_timer_handler in setProgress)
     bootTraceStage("lxmf-begin");
+
+    // Step 17.5: Telemetry manager (Stage 1 rsDeck #64 / thin hybrid)
+    // Pure optional component — no UI yet, default hub hash is set at
+    // build time. GPS may be disabled; we still bind Power + RNS so
+    // serial `g` can run the privacy-gate diagnostics even before a
+    // first fix lands.
+    telemetryManager.begin(&rns,
+#if HAS_GPS
+                           &gps,
+#else
+                           nullptr,
+#endif
+                           &powerMgr);
+    // Wire UserConfig so Settings > Time & Location > Send Telemetry /
+    // Telemetry Hub can gate the send and override the compiled-in hub
+    // hash. Optional — telemetry still works with the default hub if
+    // this is never called.
+    telemetryManager.setUserConfig(&userConfig);
+    Serial.println("[TELEMETRY] manager bound (rsDeck #64 Stage 1, default hub=da424e0f47657d7575df58a2b83b111b)");
+    bootTraceStage("telemetry-manager");
 
     // Step 18: Announce manager
     lvBootScreen.setProgress(0.78f, "Loading contacts...");
@@ -1784,6 +1815,7 @@ void setup() {
     lvSettingsScreen.setTCPClients(&tcpClients);
     lvSettingsScreen.setRNS(&rns);
     lvSettingsScreen.setIdentityManager(&identityMgr);
+    lvSettingsScreen.setAnnounceManager(announceManager);
     lvSettingsScreen.setUIManager(&ui);
     lvSettingsScreen.setIdentityHash(rns.destinationHashStr());
     lvSettingsScreen.setDestinationHash(rns.destinationHashHex());
@@ -2118,6 +2150,7 @@ void loop() {
     lxmf.loop();
     if (announceManager) announceManager->loop();
     audio.loop();
+    telemetryManager.loop();
 
     // 7. WiFi STA connection handler
     if (wifiSTAStarted) {
