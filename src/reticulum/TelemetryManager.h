@@ -1,0 +1,116 @@
+// =============================================================================
+// TelemetryManager.h — on-demand GPS telemetry sender for rsDeck #64
+// (Stage 1 / thin hybrid).
+//
+// Wire format is one opportunistic LXMF packet to a configured collector
+// (default: Lyra telemetry-collector hub). The packet carries an
+// LXMF FIELD_TELEMETRY value built by `TelemetryEncoder` whose inner
+// snapshot matches Sideband's Telemeter.packed().
+//
+// Trigger: serial console `g` only. There is no periodic scheduler — the
+// caller asserts privacy (no fix / stale fix → refuse) before queuing.
+//
+// State machine implemented in `loop()` drives the same Reticulum path /
+// identity discovery pattern LXMFManager already uses for chat, without
+// touching any of the LXMF chat code.
+// =============================================================================
+#pragma once
+
+#include <Arduino.h>
+#include <Identity.h>
+#include <Bytes.h>
+
+#include "TelemetryEncoder.h"
+
+class GPSManager;
+class Power;
+class ReticulumManager;
+class UserConfig;
+
+class TelemetryManager {
+public:
+    TelemetryManager();
+
+    // Wire dependencies at setup time. None may be null when
+    // sendNow()/loop() are exercised at runtime.
+    void begin(ReticulumManager* rns, GPSManager* gps, Power* power);
+
+    // Bind UserConfig so sendNow() can read the live opt-in flag +
+    // hub hash from Settings > Time & Location. Optional — the manager
+    // still works standalone with its compiled-in default hub hash if
+    // never bound. Reading is fresh on every sendNow() so toggling the
+    // "Send Telemetry" item in the UI applies without a live callback.
+    void setUserConfig(UserConfig* cfg) { _cfg = cfg; }
+
+    // Drive the path/identity discovery retry state machine. Safe to call
+    // every loop iteration; cheap when no attempt is in flight.
+    void loop();
+
+    // Serial helpers — share a 96-byte input buffer with the main
+    // serial parser.
+    bool handleSerial(char c, const char* line);
+    void printHelp() const;
+
+    // Programmatic API — invoked by the serial `g` command. Returns
+    // false if the privacy gate refuses (no fix / stale fix) or if a
+    // send is already in flight.
+    bool sendNow();
+
+    // 32-hex default hash is set at build time (see .cpp). The serial
+    // `G` command can update it for the current session.
+    void setHubHashHex(const char* hex32);
+    void resetHubHashToDefault();
+    const char* hubHashHex() const { return _hubHex; }
+
+    // Status queries (used by serial help / heartbeat diagnostics).
+    bool hasFreshFix() const;
+    bool isAttemptInFlight() const { return _state != State::IDLE; }
+    const char* stateName() const;
+
+    // Privacy gate threshold (ms). 30 s per the rsDeck #64 spec.
+    static constexpr uint32_t FRESH_FIX_MAX_AGE_MS = 30000UL;
+    static constexpr uint8_t  DISCOVERY_MAX_ATTEMPTS = 10;
+
+private:
+    // ----- bound subsystems -----
+    ReticulumManager* _rns = nullptr;
+    GPSManager*       _gps = nullptr;
+    Power*            _power = nullptr;
+    UserConfig*       _cfg = nullptr;       // optional, gates sendNow() privacy
+
+    // ----- destination / identity -----
+    // Default = Lyra telemetry-collector (da424e0f47657d7575df58a2b83b111b).
+    char _hubHex[33] = "da424e0f47657d7575df58a2b83b111b";
+    RNS::Bytes _hubHash;                  // 16 bytes (truncated dest hash)
+    bool _hubHashLoaded = false;
+
+    // ----- send state machine -----
+    enum class State : uint8_t {
+        IDLE = 0,
+        WAIT_IDENTITY,        // requested, polling Identity::recall()
+        WAIT_PATH,            // identity known, polling has_path()
+        SENDING,              // path & identity present, packing+sending
+    };
+    State _state = State::IDLE;
+    uint8_t  _attempts = 0;
+    unsigned long _stateAtMs = 0;
+    static constexpr unsigned long STATE_RETRY_INTERVAL_MS = 1000;
+
+    // Helpers
+    void loadHubHashIfNeeded();
+    void applyUserConfigHubHash();
+    void driveIdentityDiscovery();
+    void drivePathDiscovery();
+    bool buildAndSendSnapshot();
+    void resetToIdle(const char* reason);
+    uint64_t epochSecondsOrUptime() const;
+
+    // Cheap sanity: snapshot read of GPS -> doubles
+    struct LocSample {
+        bool   valid = false;
+        double lat = NAN, lon = NAN, alt = NAN, speed = NAN, bearing = NAN;
+        double accuracy_m = NAN;
+        uint32_t age_ms = 0;
+    };
+    LocSample readLocation() const;
+};

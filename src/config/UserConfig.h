@@ -113,6 +113,14 @@ struct UserSettings {
     bool timezoneSet = false;        // false = show timezone picker at boot
     bool use24HourTime = false;      // false = 12h (no AM/PM), true = 24h
 
+    // GPS Telemetry (issue #64) — opt-in position sharing to a hub. Off by
+    // default per privacy requirement; user must explicitly enable AND have
+    // a working hub hash configured.
+    bool   gpsTelemetryEnabled = false;                                       // master opt-in switch, default OFF
+    String gpsTelemetryHubHash = "da424e0f47657d7575df58a2b83b111b";           // 32 hex chars, Lyra collector default
+    static constexpr size_t GPS_TELEMETRY_HUB_HASH_LEN = 32;
+    static constexpr const char* GPS_TELEMETRY_DEFAULT_HUB_HASH = "da424e0f47657d7575df58a2b83b111b";
+
     // Audio
     bool audioEnabled = true;
     uint8_t audioVolume = 80;  // 0-100
