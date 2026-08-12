@@ -1,12 +1,18 @@
 // =============================================================================
 // TelemetryManager.cpp — see TelemetryManager.h.
 //
-// Stage 1 rsDeck #64 (thin hybrid): on-demand opportunistic LXMF push of
-// a Sideband-shaped FIELD_TELEMETRY value to a configured collector.
+// Stage 1 rsDeck #64 (thin hybrid): on-demand + optional periodic
+// opportunistic LXMF push of a Sideband-shaped FIELD_TELEMETRY value to
+// a configured collector.
 //
 // Critical constraints (per the issue brief):
-//   * No periodic scheduler. The serial `g` command is the only trigger.
-//   * Privacy gate refuses if no fresh fix (≤ FRESH_FIX_MAX_AGE_MS old).
+//   * Two triggers: serial `g` (on-demand) and a periodic tick driven
+//     by UserSettings::gpsTelemetryIntervalS (issue #64 "configurable by
+//     interval" privacy requirement). 0 = periodic disabled (default).
+//   * Privacy gate refuses if no fresh fix (≤ FRESH_FIX_MAX_AGE_MS old)
+//     for both triggers — periodic must never force-send with a stale
+//     or absent fix; the periodic tick just skips and retries on the
+//     next interval.
 //   * No edits to LXMFManager.{h,cpp} — the chat path is untouched.
 //   * No edits to the microReticulum library — the sign + wrap is a
 //     clone of LXMFMessage::packFull() from upstream, kept inline here
@@ -166,6 +172,39 @@ bool TelemetryManager::hasFreshFix() const {
 #endif
 }
 
+void TelemetryManager::checkPeriodicSend() {
+    // Configuration gate. All four conditions must hold for a periodic
+    // tick to fire:
+    //   1. UserConfig is bound (so we have a live opt-in / interval).
+    //   2. gpsTelemetryEnabled is true (master opt-in switch).
+    //   3. gpsTelemetryIntervalS > 0 (0 = on-demand only; periodic must
+    //      never start silently just because the user enabled the
+    //      toggle).
+    //   4. Enough time has elapsed since the last periodic attempt.
+    // sendNow() re-reads _cfg->settings() on every call and enforces its
+    // own privacy gate (fresh fix ≤ FRESH_FIX_MAX_AGE_MS); we do NOT
+    // re-implement that gate here so the two paths cannot drift.
+    if (!_cfg) return;
+    const UserSettings& s = _cfg->settings();
+    if (!s.gpsTelemetryEnabled) return;
+    const int intervalS = s.gpsTelemetryIntervalS;
+    if (intervalS <= 0) return;
+
+    const unsigned long intervalMs = (unsigned long)intervalS * 1000UL;
+    if (millis() - _lastPeriodicSendMs < intervalMs) return;
+
+    // Advance the timer *before* sendNow() so a refused send (e.g. fix
+    // not fresh, transport inactive) does not retry on every loop()
+    // iteration — next periodic attempt happens at the configured
+    // cadence regardless of refusal reason. sendNow() logs its own
+    // refusal reason, so the serial console still surfaces why the
+    // periodic tick was skipped without becoming a per-loop() spam.
+    _lastPeriodicSendMs = millis();
+
+    Serial.printf("[TELEMETRY] periodic tick firing (interval=%ds)\n", intervalS);
+    sendNow();
+}
+
 const char* TelemetryManager::stateName() const {
     switch (_state) {
         case State::IDLE:           return "IDLE";
@@ -181,7 +220,16 @@ const char* TelemetryManager::stateName() const {
 // =============================================================================
 
 void TelemetryManager::loop() {
-    if (_state == State::IDLE) return;
+    // Periodic send tick runs only while the state machine is IDLE — an
+    // in-flight on-demand send (or a periodic send that just started)
+    // must not have another periodic attempt piled on top of it. The
+    // check itself is gated on the live UserConfig so toggling
+    // gpsTelemetryEnabled off or changing the interval takes effect
+    // immediately at the next loop() tick without needing a callback.
+    if (_state == State::IDLE) {
+        checkPeriodicSend();
+        return;
+    }
     // Unsigned-subtraction idiom matches LXMFManager — safe as long as
     // STATE_RETRY_INTERVAL_MS is small relative to millis() wrap
     // (~49 days).

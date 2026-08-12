@@ -1655,6 +1655,7 @@ void setup() {
     lvHomeScreen.setRadio(&radio);
     lvHomeScreen.setUserConfig(&userConfig);
     lvHomeScreen.setLXMFManager(&lxmf);
+    lvHomeScreen.setGPSManager(&gps);
     lvHomeScreen.setAnnounceManager(announceManager);
     lvHomeScreen.setRadioOnline(radioOnline);
     lvHomeScreen.setTCPClients(&tcpClients);

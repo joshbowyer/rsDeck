@@ -995,6 +995,22 @@ void LvSettingsScreen::buildItems() {
         _items.push_back(hubItem);
         idx++;
     }
+    // Periodic telemetry interval (issue #64 "configurable by interval"
+    // privacy requirement). 0 = on-demand only (default — periodic must
+    // never start silently just because "Send Telemetry" is enabled; the
+    // user must pick a non-zero interval explicitly). Non-zero values are
+    // clamped at sanitizeSettings() to the LoRa channel-protection floor.
+    _items.push_back({"Telemetry Interval (s)", SettingType::INTEGER,
+        [&s]() { return s.gpsTelemetryIntervalS; },
+        [&s](int v) { s.gpsTelemetryIntervalS = v; },
+        [](int v) -> String {
+            // 0 is the on-demand-only sentinel; present it as "Off" so the
+            // user is never confused about whether periodic is running.
+            if (v == 0) return String("Off");
+            return String(v) + "s";
+        },
+        0, UserSettings::GPS_TELEMETRY_INTERVAL_MAX_S, 60});
+    idx++;
 #endif
     _items.push_back({"Timezone", SettingType::INTEGER,
         [&s]() { return (int)s.timezoneIdx; },

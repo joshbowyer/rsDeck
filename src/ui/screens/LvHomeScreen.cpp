@@ -371,14 +371,48 @@ void LvHomeScreen::refreshUI() {
 
 #if HAS_GPS
     bool gpsOn = _cfg && _cfg->settings().gpsTimeEnabled;
+    if (_gps && gpsOn) {
+        bool hasFix = _gps->hasLocationFix();
+        uint32_t ageMs = _gps->fixAgeMs();
+        bool everFixed = (ageMs != UINT32_MAX);
+        bool stale = everFixed && (ageMs > 60000);
+        String status;
+        uint32_t color;
+        if (!everFixed) {
+            status = "NO FIX";
+            color = Theme::TEXT_MUTED;
+        } else if (hasFix && !stale) {
+            status = "FIX";
+            if (_gps->satellites() > 0) status += " " + String(_gps->satellites()) + "s";
+            color = Theme::SUCCESS;
+        } else {
+            status = "STALE";
+            color = Theme::WARNING_CLR;
+        }
+        if (everFixed) {
+            char ageStr[16];
+            uint32_t secs = ageMs / 1000;
+            if (secs < 60) snprintf(ageStr, sizeof(ageStr), "%lus", (unsigned long)secs);
+            else snprintf(ageStr, sizeof(ageStr), "%lum", (unsigned long)(secs/60));
+            status += " ";
+            status += ageStr;
+        }
+        lv_label_set_text(_lblLinks, status.c_str());
+        lv_obj_set_style_text_color(_lblLinks, lv_color_hex(color), 0);
+        uint32_t border = hasFix && !stale ? Theme::SUCCESS : (everFixed ? Theme::WARNING_CLR : Theme::BORDER);
+        setPanelTone(_statLinks, gpsOn ? Theme::PRIMARY_SUBTLE : Theme::BG_ELEVATED, border);
+    } else {
+        lv_label_set_text(_lblLinks, gpsOn ? "ON" : "OFF");
+        lv_obj_set_style_text_color(_lblLinks, lv_color_hex(
+            gpsOn ? Theme::SUCCESS : Theme::TEXT_MUTED), 0);
+        setPanelTone(_statLinks, gpsOn ? Theme::PRIMARY_SUBTLE : Theme::BG_ELEVATED,
+                      gpsOn ? Theme::PRIMARY : Theme::BORDER);
+    }
 #else
-    bool gpsOn = false;
+    lv_label_set_text(_lblLinks, "OFF");
+    lv_obj_set_style_text_color(_lblLinks, lv_color_hex(Theme::TEXT_MUTED), 0);
+    setPanelTone(_statLinks, Theme::BG_ELEVATED, Theme::BORDER);
 #endif
-    lv_label_set_text(_lblLinks, gpsOn ? "ON" : "OFF");
-    lv_obj_set_style_text_color(_lblLinks, lv_color_hex(
-        gpsOn ? Theme::SUCCESS : Theme::TEXT_MUTED), 0);
-    setPanelTone(_statLinks, gpsOn ? Theme::PRIMARY_SUBTLE : Theme::BG_ELEVATED,
-                 gpsOn ? Theme::PRIMARY : Theme::BORDER);
 
     if (!_rns) {
         lv_label_set_text(_lblSummary, "Identity unavailable");

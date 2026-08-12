@@ -7,8 +7,14 @@
 // LXMF FIELD_TELEMETRY value built by `TelemetryEncoder` whose inner
 // snapshot matches Sideband's Telemeter.packed().
 //
-// Trigger: serial console `g` only. There is no periodic scheduler — the
-// caller asserts privacy (no fix / stale fix → refuse) before queuing.
+// Triggers:
+//   * Serial console `g` (on-demand, privacy-gated).
+//   * Periodic tick driven by `UserSettings::gpsTelemetryIntervalS`
+//     (issue #64 "configurable by interval" privacy requirement). 0
+//     disables periodic sending — the same on-demand gate (fresh fix ≤
+//     FRESH_FIX_MAX_AGE_MS) must pass for both paths. The periodic
+//     timer is advanced even on a refused send so a persistently stale
+//     fix doesn't trigger a retry-every-loop() spam.
 //
 // State machine implemented in `loop()` drives the same Reticulum path /
 // identity discovery pattern LXMFManager already uses for chat, without
@@ -104,6 +110,19 @@ private:
     bool buildAndSendSnapshot();
     void resetToIdle(const char* reason);
     uint64_t epochSecondsOrUptime() const;
+
+    // Periodic-send gate. Called from loop() when the state machine is
+    // IDLE. Reads the live UserConfig, so toggling "Send Telemetry" or
+    // changing the interval takes effect on the next loop tick without a
+    // callback. Reuses sendNow() so the privacy gate is enforced
+    // identically between on-demand and periodic paths.
+    void checkPeriodicSend();
+
+    // Periodic-send bookkeeping. _lastPeriodicSendMs is updated *before*
+    // sendNow() so a refused send (e.g. stale fix) does not retry on
+    // every loop() iteration — the next attempt is scheduled at the
+    // configured interval from this tick.
+    unsigned long _lastPeriodicSendMs = 0;
 
     // Cheap sanity: snapshot read of GPS -> doubles
     struct LocSample {

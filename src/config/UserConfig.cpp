@@ -49,6 +49,19 @@ void UserConfig::sanitizeSettings() {
             _settings.gpsTelemetryHubHash = UserSettings::GPS_TELEMETRY_DEFAULT_HUB_HASH;
         }
     }
+
+    // GPS telemetry periodic interval (seconds). 0 is a valid "off" value
+    // (the on-demand-only default). Negative values are coerced to 0. Any
+    // positive value below the LoRa channel-protection floor is clamped
+    // up to the floor; values above the ceiling are clamped down.
+    if (_settings.gpsTelemetryIntervalS < 0) {
+        _settings.gpsTelemetryIntervalS = 0;
+    } else if (_settings.gpsTelemetryIntervalS > 0 &&
+               _settings.gpsTelemetryIntervalS < UserSettings::GPS_TELEMETRY_INTERVAL_MIN_S) {
+        _settings.gpsTelemetryIntervalS = UserSettings::GPS_TELEMETRY_INTERVAL_MIN_S;
+    } else if (_settings.gpsTelemetryIntervalS > UserSettings::GPS_TELEMETRY_INTERVAL_MAX_S) {
+        _settings.gpsTelemetryIntervalS = UserSettings::GPS_TELEMETRY_INTERVAL_MAX_S;
+    }
 }
 
 bool UserConfig::parseJson(const String& json) {
@@ -152,6 +165,10 @@ bool UserConfig::parseJson(const String& json) {
     // GPS telemetry (issue #64) — opt-in position sharing to a hub.
     _settings.gpsTelemetryEnabled = doc["gps_telemetry_enabled"] | false;
     _settings.gpsTelemetryHubHash = doc["gps_telemetry_hub"]      | UserSettings::GPS_TELEMETRY_DEFAULT_HUB_HASH;
+    // Periodic interval (seconds). 0 = on-demand only (default). Non-zero
+    // values are clamped in sanitizeSettings() to enforce the LoRa
+    // channel-protection minimum.
+    _settings.gpsTelemetryIntervalS = doc["gps_telemetry_interval_s"] | 0;
 
     _settings.audioEnabled = doc["audio_on"]  | true;
     _settings.audioVolume  = doc["audio_vol"] | 80;
@@ -238,6 +255,7 @@ String UserConfig::serializeToJson() {
     // GPS telemetry (issue #64) — opt-in position sharing to a hub.
     doc["gps_telemetry_enabled"] = _settings.gpsTelemetryEnabled;
     doc["gps_telemetry_hub"]      = _settings.gpsTelemetryHubHash;
+    doc["gps_telemetry_interval_s"] = _settings.gpsTelemetryIntervalS;
 
     doc["audio_on"]  = _settings.audioEnabled;
     doc["audio_vol"] = _settings.audioVolume;

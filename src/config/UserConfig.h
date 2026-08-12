@@ -121,6 +121,17 @@ struct UserSettings {
     static constexpr size_t GPS_TELEMETRY_HUB_HASH_LEN = 32;
     static constexpr const char* GPS_TELEMETRY_DEFAULT_HUB_HASH = "da424e0f47657d7575df58a2b83b111b";
 
+    // Periodic telemetry cadence (seconds). 0 = on-demand only (default):
+    // periodic sending must never silently start just because the user
+    // enabled "Send Telemetry"; the user must also pick a non-zero
+    // interval explicitly. Non-zero values are clamped to
+    // [GPS_TELEMETRY_INTERVAL_MIN_S, GPS_TELEMETRY_INTERVAL_MAX_S] by
+    // sanitizeSettings(). The 60 s minimum protects the LoRa channel
+    // from being hammered by a careless 1-second setting.
+    int gpsTelemetryIntervalS = 0;
+    static constexpr int GPS_TELEMETRY_INTERVAL_MIN_S = 60;        // 1 min floor
+    static constexpr int GPS_TELEMETRY_INTERVAL_MAX_S = 86400;     // 24 h ceiling
+
     // Audio
     bool audioEnabled = true;
     uint8_t audioVolume = 80;  // 0-100
