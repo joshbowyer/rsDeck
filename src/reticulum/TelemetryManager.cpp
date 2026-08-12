@@ -137,10 +137,22 @@ bool TelemetryManager::sendNow() {
 
     const LocSample loc = readLocation();
     if (!loc.valid) {
+        // Distinguish "no fix at all" vs "fix exists but too old" for
+        // the diagnostic counters. Log message kept identical to
+        // existing behavior (the combined !loc.valid check catches
+        // both cases at the same point). The counters are purely
+        // additive — no change to gating decision.
+#if HAS_GPS
+        if (_gps && _gps->hasLocationFix()) _refusedStale++;
+        else                                _refusedNoFix++;
+#else
+        _refusedNoFix++;
+#endif
         Serial.println("[TELEMETRY] refused: no GPS fix");
         return false;
     }
     if (loc.age_ms > FRESH_FIX_MAX_AGE_MS) {
+        _refusedStale++;
         Serial.printf("[TELEMETRY] refused: GPS fix stale (%lu ms > %lu ms)\n",
                       (unsigned long)loc.age_ms,
                       (unsigned long)FRESH_FIX_MAX_AGE_MS);
@@ -216,6 +228,7 @@ void TelemetryManager::checkPeriodicSend() {
     // refusal reason, so the serial console still surfaces why the
     // periodic tick was skipped without becoming a per-loop() spam.
     _lastPeriodicSendMs = millis();
+    _ticksFired++;
 
     Serial.printf("[TELEMETRY] periodic tick firing (interval=%ds)\n", intervalS);
     sendNow();
@@ -520,6 +533,7 @@ bool TelemetryManager::buildAndSendSnapshot() {
                 Serial.println("[TELEMETRY] Packet::send: no interface accepted the packet");
                 return false;
             }
+            _txAccepted++;
             Serial.println("[TELEMETRY] packet accepted by Transport");
             return true;
         }
@@ -548,6 +562,12 @@ void TelemetryManager::resetToIdle(const char* reason) {
     Serial.printf("[TELEMETRY] aborting send: %s\n", reason ? reason : "?");
     _state = State::IDLE;
     _attempts = 0;
+    // resetToIdle() is only invoked from the WAIT_IDENTITY / WAIT_PATH
+    // timeout branches (driveIdentityDiscovery / drivePathDiscovery);
+    // the SENDING → IDLE transition is a direct assignment, not a call
+    // here. So this counter precisely tracks discovery-timeout aborts
+    // (i.e. discovery that never reached SENDING), per spec.
+    _discoveryAborted++;
 }
 
 // =============================================================================
@@ -631,6 +651,14 @@ bool TelemetryManager::handleSerial(char c, const char* /*line*/) {
             // Lowercase 'g' = trigger sendNow (privacy-gated).
             sendNow();
             return true;
+        case 'V':
+            // Uppercase 'V' = telemetry status dump (counters + state).
+            // 'T' was avoided because it is already mapped to the raw
+            // radio-test hotkey (onHotkeyRadioTest) in main.cpp's
+            // handleSerialCommands switch — see the 'V' override
+            // rationale in the orchestrator task.
+            printStatus();
+            return true;
         default:
             return false;
     }
@@ -639,4 +667,29 @@ bool TelemetryManager::handleSerial(char c, const char* /*line*/) {
 void TelemetryManager::printHelp() const {
     Serial.println("[TELEMETRY] g send-GPS-now       (privacy-gated)");
     Serial.println("[TELEMETRY] G<32hex> set-hub-hash (default  da424e0f47657d7575df58a2b83b111b)");
+    Serial.println("[TELEMETRY] V telemetry-status   (counters + state)");
+}
+
+void TelemetryManager::printStatus() const {
+    const Counters c = counters();
+    // Pull interval + enabled from live UserConfig (same source
+    // checkPeriodicSend() uses), so the dump reflects what the
+    // periodic gate actually sees right now.
+    int intervalS = 0;
+    char enabled = '?';
+    if (_cfg) {
+        intervalS = _cfg->settings().gpsTelemetryIntervalS;
+        enabled   = _cfg->settings().gpsTelemetryEnabled ? 'Y' : 'N';
+    } else {
+        enabled = 'N';
+    }
+    Serial.printf("[TELEMETRY-STATUS] ticks=%lu noFix=%lu stale=%lu discoveryAbort=%lu txOk=%lu interval=%ds enabled=%c state=%s\n",
+                  (unsigned long)c.ticksFired,
+                  (unsigned long)c.refusedNoFix,
+                  (unsigned long)c.refusedStale,
+                  (unsigned long)c.discoveryAborted,
+                  (unsigned long)c.txAccepted,
+                  intervalS,
+                  enabled,
+                  stateName());
 }

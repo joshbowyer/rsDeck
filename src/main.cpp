@@ -982,7 +982,7 @@ static void handleSerialLineCommand(const char* line) {
 }
 
 static void printSerialHelp() {
-    Serial.println("[SERIAL] commands: ? help | a announce | t raw-test | d diag | r rssi | i irq | p tx-power-cycle | m min-power | q iq | b battery | g telemetry-send | +/- freq");
+    Serial.println("[SERIAL] commands: ? help | a announce | t raw-test | d diag | r rssi | i irq | p tx-power-cycle | m min-power | q iq | b battery | g telemetry-send | V telemetry-status | +/- freq");
     Serial.println("[SERIAL] line commands: F<hz> exact-frequency | P<dBm> exact-tx-power | L<len> [dest_hash] LXMF test | B<ratio> set-adc-divider-ratio | G<32hex> telemetry-hub");
     Serial.println("[SERIAL] lite relay diag: H<len> [dest] Header2 data | J [dest] linkreq | K<ctx_hex> link-data | Y<ctx_hex> link-proof");
     telemetryManager.printHelp();
@@ -1084,6 +1084,13 @@ static void handleSerialCommands() {
                 break;
             case 'g':
                 telemetryManager.handleSerial('g', nullptr);
+                break;
+            case 'v':
+            case 'V':
+                // 'V' = telemetry status dump (counters + state).
+                // Avoided 'T' because it is already mapped to
+                // onHotkeyRadioTest() at the case 't'/'T' branch above.
+                telemetryManager.handleSerial('V', nullptr);
                 break;
             case '+':
             case '=':
@@ -2385,12 +2392,18 @@ void loop() {
             }
 #if HAS_GPS
             if (userConfig.settings().gpsTimeEnabled) {
-                Serial.printf("[GPS] sats=%d timeFix=%s locFix=%s syncs=%lu chars=%lu\n",
+                const auto tc = telemetryManager.counters();
+                Serial.printf("[GPS] sats=%d timeFix=%s locFix=%s syncs=%lu chars=%lu telemTicks=%lu telemNoFix=%lu telemStale=%lu telemAbort=%lu telemTx=%lu\n",
                     gps.satellites(),
                     gps.hasTimeFix() ? "YES" : "NO",
                     gps.hasLocationFix() ? "YES" : "NO",
                     (unsigned long)gps.timeSyncCount(),
-                    (unsigned long)gps.charsProcessed());
+                    (unsigned long)gps.charsProcessed(),
+                    (unsigned long)tc.ticksFired,
+                    (unsigned long)tc.refusedNoFix,
+                    (unsigned long)tc.refusedStale,
+                    (unsigned long)tc.discoveryAborted,
+                    (unsigned long)tc.txAccepted);
             }
 #endif
             maxLoopTime = 0;
