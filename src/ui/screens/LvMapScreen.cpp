@@ -27,6 +27,15 @@ namespace {
 // All HUD labels live on the clipped content area's top/bottom edges,
 // overlaid on the tile grid. Coordinates are relative to the content
 // parent (which UIManager sets at y=STATUS_BAR_H=20).
+//
+// Top labels sit in the top ~16 px so they're always above any tile
+// imagery. Bottom labels are positioned so they sit just inside the
+// content area's bottom edge (CONTENT_H = 194, label h = 14, so y=174
+// puts the bottom at y=188 — 6 px above the tab bar at y=194..240).
+// After the tile-grid formula fix in rebuildTiles() (so the 2-row grid
+// covers the FULL visible vertical range with a buffer row below), the
+// bottom labels are reliably ON TOP of the tile grid, not in empty
+// space below it.
 
 constexpr int kHudZoomX = 4;
 constexpr int kHudZoomY = 2;
@@ -39,6 +48,24 @@ constexpr int kHudGpsX = 196;
 constexpr int kHudGpsY = 174;
 
 constexpr int kMarkerSize = 14;
+
+// ---- Debug logging gate ----
+//
+// Set LV_MAP_DEBUG=1 to enable per-frame Serial logging of the map
+// screen's tile grid / request flow. Defaults OFF so production builds
+// stay quiet (one Serial.printf per refreshUI() tick at ~60 Hz would
+// flood the 115200 baud line and slow the main loop). Toggle from
+// platformio.ini build_flags with `-DLV_MAP_DEBUG=1` when investigating
+// "no tiles render" reports on hardware.
+#ifndef LV_MAP_DEBUG
+#define LV_MAP_DEBUG 0
+#endif
+
+#if LV_MAP_DEBUG
+#define MAP_LOG(...) Serial.printf(__VA_ARGS__)
+#else
+#define MAP_LOG(...) ((void)0)
+#endif
 
 lv_obj_t* makeHudLabel(lv_obj_t* parent, int x, int y, int w, int h,
                        const lv_font_t* font, uint32_t color,
@@ -145,10 +172,19 @@ void LvMapScreen::createUI(lv_obj_t* parent) {
     lv_obj_add_flag(_marker, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(_marker, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
-    // Initial layout
+    // Initial layout. Note: onEnter() (called by UIManager right after
+    // createUI() returns) is the canonical place for "first entry" work
+    // (GPS auto-center, etc). The two rebuildTiles() calls here are for
+    // the case where GPS is already wired but the screen's persistent
+    // state doesn't yet have the GPS fix (rare race; harmless if
+    // onEnter() does the same thing a few ms later).
     rebuildTiles();
-    centerOnGpsIfAvailable();
-    rebuildTiles();  // second pass: center may have moved the viewport
+    if (_gps && _gps->hasLocationFix() && !_everCenteredOnGps) {
+        centerOnGpsIfAvailable();
+        _everCenteredOnGps = true;
+        _followGPS = true;
+        rebuildTiles();
+    }
     updateHud();
     requestVisibleTiles();
 }
@@ -179,16 +215,35 @@ void LvMapScreen::onEnter() {
     _lastMarkerMs = 0;
     _lastTileRequestMs = 0;
     _lastHudRefreshMs = 0;
+    _noTilesToastPendingMs = 0;
     _touchActive = false;
     _touchDoubleArmed = false;
 
     // Remember which tab the user came from so Esc can put them back.
     if (_ui) _prevTab = _ui->lvTabBar().getActiveTab();
 
-    // Snap to GPS fix if we're already following (so a brief tab-switch
-    // away and back doesn't yank the map). Otherwise keep the previous
-    // center so the user's last view is preserved.
-    if (_followGPS) centerOnGpsIfAvailable();
+    // On first entry (the screen's persistent state still reflects the
+    // initialized default, not any user-panned view), if a GPS fix is
+    // available, arm follow-GPS AND center on it. This means the user
+    // who has a working fix sees their location immediately instead of
+    // the default demo view.
+    //
+    // On subsequent entries the user's pan/zoom is preserved: the
+    // existing "if (_followGPS) centerOnGpsIfAvailable();" branch handles
+    // re-centering for users who were already in follow mode.
+    if (!_everCenteredOnGps && _gps && _gps->hasLocationFix()) {
+        _followGPS = true;
+        centerOnGpsIfAvailable();
+        _everCenteredOnGps = true;
+        MAP_LOG("[MAP] onEnter: GPS fix available, follow-GPS armed at z=%d (%lld, %lld)\n",
+                _zoom, (long long)_centerWorldX, (long long)_centerWorldY);
+    } else if (_followGPS) {
+        centerOnGpsIfAvailable();
+        MAP_LOG("[MAP] onEnter: re-centering on GPS (follow mode preserved)\n");
+    } else {
+        MAP_LOG("[MAP] onEnter: keeping prior view z=%d (%lld, %lld) follow=%d\n",
+                _zoom, (long long)_centerWorldX, (long long)_centerWorldY, _followGPS);
+    }
     rebuildTiles();
     updateHud();
     requestVisibleTiles();
@@ -305,6 +360,28 @@ void LvMapScreen::refreshUI() {
         _lastHudRefreshMs = now;
         updateHud();
     }
+
+    // 6. "No tiles for this area" toast — fire once per view if the
+    //    visible tile range has produced zero READY slots for >2.5s
+    //    after the request was queued. This is a UX hint that the issue
+    //    is data coverage (SD card has no tiles for this z/x/y) rather
+    //    than a rendering bug. Reset on pan/zoom/recenter so a different
+    //    area with tiles doesn't keep the toast suppressed.
+    if (_noTilesToastPendingMs == 0) {
+        _noTilesToastPendingMs = now;  // start the timer now
+    } else if (!_noTilesToastShown && (now - _noTilesToastPendingMs) > 2500 &&
+               _anySlotReadySinceRebuild == false) {
+        // The TileCache has a built-in dumpStatus() that can show
+        // pool/queue state for deeper inspection; this toast is the
+        // user-facing summary.
+        if (_ui) {
+            _ui->lvStatusBar().showToast("No tiles for this area", 2500);
+        }
+        _noTilesToastShown = true;
+        MAP_LOG("[MAP] NO TILES for view z=%d (%lld, %lld) after %lums — likely data coverage issue\n",
+                _zoom, (long long)_centerWorldX, (long long)_centerWorldY,
+                (unsigned long)(now - _noTilesToastPendingMs));
+    }
 }
 
 bool LvMapScreen::handleKey(const KeyEvent& event) {
@@ -400,11 +477,44 @@ void LvMapScreen::rebuildTiles() {
     viewportOriginWorldPx(ox, oy);
     SlippyMath::TileXY tl = SlippyMath::worldPxToTile({ox, oy});
 
-    // Visible tile range with one buffer tile on each edge. We use 3 cols
-    // and 2 rows (6 slots total) regardless of zoom — at any zoom only
-    // 1-3 tiles overlap the viewport, and LVGL clips the rest.
+    // Visible tile range with buffer tiles on the left/bottom edges.
+    //
+    // GRID_COLS=3, GRID_ROWS=2 (6 slots). With 256-px tiles and a
+    // 320x194 content area, the visible width is 1.25 tiles and the
+    // visible height is 0.76 tiles. The grid therefore always covers
+    // 2-3 tile columns and 1-2 tile rows of the world.
+    //
+    // Placement: anchor the grid on the TOP-LEFT visible tile (tl) and
+    // extend DOWN and RIGHT. The buffer tile is on the LEFT (txMin = tl.x
+    // - 1) and BELOW (tyMin = tl.y, no buffer above — the second row
+    // IS the buffer-below). The previous formula (tyMin = tl.y - 1) put
+    // the buffer above, which left the bottom half of the viewport
+    // uncovered at low zooms (e.g. z=5 center=(0,0) → visible tile rows
+    // are y=-1 AND y=0, but the old grid only showed y=-2 and y=-1, so
+    // the bottom 50% of the screen was empty placeholder-less gray).
+    //
+    // For high zooms (e.g. z=15) the visible is 1-2 cols x 1 row; the
+    // grid just has 1-2 buffers around that, same as before.
     int32_t txMin = tl.x - 1;
-    int32_t tyMin = tl.y - 1;
+    int32_t tyMin = tl.y;
+
+    // Reset the "saw any ready tile this rebuild" flag. Used by the
+    // "no tiles for this area" toast in refreshUI() — fires if the
+    // current view has no READY tiles for >2.5s after the request was
+    // queued (likely data coverage issue, not a rendering bug).
+    _anySlotReadySinceRebuild = false;
+
+#if LV_MAP_DEBUG
+    int32_t visColMax = tl.x;
+    int32_t visRowMax = tl.y;
+    {
+        int64_t cx = ox + VIEW_W;
+        int64_t cy = oy + VIEW_H;
+        SlippyMath::TileXY br = SlippyMath::worldPxToTile({cx, cy});
+        visColMax = br.x;
+        visRowMax = br.y;
+    }
+#endif
 
     for (int row = 0; row < GRID_ROWS; ++row) {
         for (int col = 0; col < GRID_COLS; ++col) {
@@ -432,12 +542,20 @@ void LvMapScreen::rebuildTiles() {
             if (_tileCache) {
                 dsc = _tileCache->getTileIfReady(MAPSET_NAME, _zoom, tx, ty);
             }
+#if LV_MAP_DEBUG
+            bool isInVisibleRange =
+                (tx >= tl.x && tx <= visColMax && ty >= tl.y && ty <= visRowMax);
+#endif
             if (dsc) {
                 if (s.img && s.curDsc != dsc) {
                     lv_img_set_src(s.img, dsc);
                     s.curDsc = dsc;
                     lv_obj_clear_flag(s.img, LV_OBJ_FLAG_HIDDEN);
                 }
+                _anySlotReadySinceRebuild = true;
+                MAP_LOG("[MAP] slot %d z=%d x=%d y=%d -> READY visible=%s\n",
+                        idx, _zoom, tx, ty,
+                        isInVisibleRange ? "yes" : "no");
             } else {
                 // No tile yet — hide the img so the placeholder shows.
                 // We avoid lv_img_set_src(nullptr) here because LVGL
@@ -449,6 +567,9 @@ void LvMapScreen::rebuildTiles() {
                     }
                     s.curDsc = nullptr;
                 }
+                MAP_LOG("[MAP] slot %d z=%d x=%d y=%d -> placeholder (no dsc) visible=%s\n",
+                        idx, _zoom, tx, ty,
+                        isInVisibleRange ? "yes" : "no");
             }
         }
     }
@@ -456,12 +577,23 @@ void LvMapScreen::rebuildTiles() {
 
 void LvMapScreen::requestVisibleTiles() {
     if (!_tileCache) return;
+    int requested = 0;
+    int deduped = 0;
     for (int i = 0; i < SLOT_COUNT; ++i) {
         TileSlot& s = _slots[i];
         if (s.tz != _zoom) continue;  // slot is being repopulated this tick
-        _tileCache->requestTile(MAPSET_NAME, s.tz, s.tx, s.ty,
-                                 TileCache::Priority::PRIO_NORMAL);
+        // requestTile() returns false only if the request was deduped OR
+        // the (z,x,y) is in the negative cache. Both are "no work needed",
+        // but they're different from "queue full" so we don't fail loudly.
+        if (_tileCache->requestTile(MAPSET_NAME, s.tz, s.tx, s.ty,
+                                    TileCache::Priority::PRIO_NORMAL)) {
+            ++requested;
+        } else {
+            ++deduped;
+        }
     }
+    MAP_LOG("[MAP] requestVisibleTiles z=%d requested=%d deduped_or_neg=%d\n",
+            _zoom, requested, deduped);
 }
 
 // ---- GPS marker / follow ----
@@ -472,6 +604,10 @@ void LvMapScreen::centerOnGpsIfAvailable() {
         _gps->longitude(), _gps->latitude(), _zoom);
     _centerWorldX = wp.x;
     _centerWorldY = wp.y;
+    // A new GPS-centered view gets its own 2.5s grace period before
+    // the "no tiles" toast can fire.
+    _noTilesToastPendingMs = 0;
+    _noTilesToastShown = false;
 }
 
 void LvMapScreen::updateMarker() {
@@ -531,10 +667,15 @@ void LvMapScreen::updateHud() {
 // ---- Pan / zoom primitives ----
 
 void LvMapScreen::panBy(int32_t dxPx, int32_t dyPx) {
+    if (dxPx == 0 && dyPx == 0) return;
     _centerWorldX += dxPx;
     _centerWorldY += dyPx;
     // Any manual pan disables follow-GPS. (The 'c' key re-arms it.)
     _followGPS = false;
+    // Reset the "no tiles" toast timer so a new view gets its own
+    // 2.5s grace period before the toast can fire.
+    _noTilesToastPendingMs = 0;
+    _noTilesToastShown = false;
 }
 
 void LvMapScreen::clampZoom() {
@@ -558,6 +699,8 @@ void LvMapScreen::zoomIn() {
     }
 
     _followGPS = false;
+    _noTilesToastPendingMs = 0;
+    _noTilesToastShown = false;
 }
 
 void LvMapScreen::zoomOut() {
@@ -573,4 +716,6 @@ void LvMapScreen::zoomOut() {
     }
 
     _followGPS = false;
+    _noTilesToastPendingMs = 0;
+    _noTilesToastShown = false;
 }

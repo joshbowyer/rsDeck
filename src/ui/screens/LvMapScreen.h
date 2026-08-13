@@ -17,8 +17,10 @@ class GPSManager;
 //                    pan/zoom clears it
 //
 // Layout: a 3x2 grid of 256x256 lv_img slots sized to cover the content area
-// (CONTENT_W=320, CONTENT_H=194). One buffer tile on each edge handles
-// panning near tile boundaries; LVGL's parent clipping hides the rest.
+// (CONTENT_W=320, CONTENT_H=194). One buffer tile on the left edge and
+// one on the bottom edge handle panning near tile boundaries; LVGL's
+// parent clipping hides the rest. See rebuildTiles() for the exact
+// txMin/tyMin formula and the rationale for the bottom-buffer placement.
 // On entry the screen requests tiles for every visible slot whose key
 // changed since last refresh and re-arms the request every ~250 ms while
 // tiles remain missing — the TileCache's internal pump() (driven from
@@ -97,6 +99,19 @@ private:
     static constexpr int ZOOM_MIN = 0;
     static constexpr int ZOOM_MAX = 15;
 
+    // Default startup view. z=1 (continental-blocks scale) is the lowest
+    // confirmed-present zoom on the user's SD card; tile (1,1) at z=1 is
+    // a verified real file (see listSdMaps() in main.cpp / 'X' serial
+    // command). Centering on the world-pixel center of that tile
+    // (256+128, 256+128) = (384, 384) is a safe "demo view" that always
+    // shows at least one real tile on first boot, so the user can verify
+    // the rendering pipeline works before assuming a data-coverage issue.
+    // If a GPS fix is available at first entry, onEnter() overrides this
+    // by arming follow-GPS and centering on the fix (see _everCenteredOnGps).
+    static constexpr int DEFAULT_ZOOM = 1;
+    static constexpr int64_t DEFAULT_CENTER_WORLD_X = 384;  // z=1 tile (1,1) center
+    static constexpr int64_t DEFAULT_CENTER_WORLD_Y = 384;  // z=1 tile (1,1) center
+
     // Hardcoded mapset for v1. Other mapsets on the user's card are
     // detectable via 'X' serial command; cycling between them is a TODO.
     // (see listSdMaps() in main.cpp for the discovery helper).
@@ -136,10 +151,28 @@ private:
     class UIManager* _ui = nullptr;
 
     // ---- State (the 3 things from the design) ----
-    int _zoom = 5;  // z=5 = continental; a sane first-glance default
-    int64_t _centerWorldX = 0;
-    int64_t _centerWorldY = 0;
+    int _zoom = DEFAULT_ZOOM;
+    int64_t _centerWorldX = DEFAULT_CENTER_WORLD_X;
+    int64_t _centerWorldY = DEFAULT_CENTER_WORLD_Y;
     bool _followGPS = false;
+    // Set to true after onEnter() has armed follow-GPS for the first
+    // time. Prevents subsequent entries from re-snapping to a stale
+    // GPS fix when the user has explicitly panned away. Persists for
+    // the life of the LvMapScreen object (never reset by destroyUI).
+    bool _everCenteredOnGps = false;
+    // Timestamp at which the "no tiles for this area" toast becomes
+    // eligible (set on each rebuildTiles() and on pan/zoom). 0 = not
+    // pending. Used to delay the toast so we don't fire it during the
+    // normal "request just queued, not yet decoded" window.
+    unsigned long _noTilesToastPendingMs = 0;
+    // True once the "no tiles" toast has fired for the current view.
+    // Reset to false on any pan/zoom/recenter so the toast can re-fire
+    // for a different area that also has no tiles.
+    bool _noTilesToastShown = false;
+    // Set by rebuildTiles() if ANY of the 6 grid slots had a READY tile
+    // descriptor this pass. Used by the "no tiles for this area" toast
+    // in refreshUI() — fires only if zero slots were ready for >2.5s.
+    bool _anySlotReadySinceRebuild = false;
 
     // ---- Visual layers ----
     lv_obj_t* _mapContainer = nullptr;  // clipped parent for tile slots
