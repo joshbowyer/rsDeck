@@ -400,11 +400,9 @@ void onHotkeyAnnounce() {
     manualAnnounce();
 }
 void onHotkeyMap() {
-    // Open the offline slippy-map screen. The screen captures the active
-    // tab in onEnter() so the user can press Esc to return to where they
-    // were. Hidden behind Ctrl+L so it doesn't conflict with the bare-'c'
-    // keybinding the map screen itself uses to re-arm follow-GPS.
-    ui.setScreen(&lvMapScreen);
+    // Open via tab so the bar highlights correctly and onEnter captures
+    // previous tab for Esc. Ctrl+L remains a handy shortcut.
+    ui.lvTabBar().setActiveTab(LvTabBar::TAB_MAP);
 }
 void onHotkeyAutoIface() {
     Serial.println("=== AUTOIFACE DUMP ===");
@@ -2064,6 +2062,7 @@ void setup() {
     lvTabScreens[LvTabBar::TAB_CONTACTS] = &lvContactsScreen;
     lvTabScreens[LvTabBar::TAB_MSGS]     = &lvMessagesScreen;
     lvTabScreens[LvTabBar::TAB_NODES]    = &lvNodesScreen;
+    lvTabScreens[LvTabBar::TAB_MAP]      = &lvMapScreen;
     lvTabScreens[LvTabBar::TAB_SETTINGS] = &lvSettingsScreen;
 
     ui.lvTabBar().setTabCallback([](int tab) {
