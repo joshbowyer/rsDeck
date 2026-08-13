@@ -4,13 +4,15 @@
 // TileStore.h — path building + chunked SD access for slippy-map PNG tiles
 // =============================================================================
 //
-// The on-disk layout is the standard XYZ slippy-map convention:
-//      /maps/<style>/<z>/<x>/<y>.png
-// e.g. /maps/openstreetmap/10/512/340.png
+// The on-disk layout (confirmed against the user's actual SD card, matches
+// Meshtastic MUI's MUIMapBuilder convention) lives at the SD card ROOT, not
+// under a /maps/ prefix, and nests x/y/z (NOT the more common z/x/y order):
+//      /<mapset>/<x>/<y>/<z>.png
+// e.g. /Basemapsxyz-OSM/512/340/10.png
 //
-// `style` is a free-form string maintained by the upstream MUIMapBuilder tool.
-// `z`, `x`, `y` are tile-coordinate integers (y=0 is the north pole — see
-// SlippyMath.h for the TMS-y-flip troubleshooting note).
+// `mapset` is a free-form style name (e.g. "Basemapsxyz-OSM", "Esri-Satellite")
+// selectable in the UI. `x`, `y`, `z` are tile-coordinate integers (y=0 is the
+// north pole — see SlippyMath.h for the TMS-y-flip troubleshooting note).
 //
 // TileStore deliberately does NOT cache, decode, or render anything. It is a
 // thin SD facade used by TileCache, which owns the decode state machine.
@@ -26,15 +28,16 @@ class TileStore {
 public:
     // Build the absolute path string for a tile. The returned String is owned
     // by the caller; it is short-lived (just enough for the SD file open).
+    // Layout: /<mapset>/<x>/<y>/<z>.png (SD root, x/y/z order — see header note).
     static String tilePath(const char* style, int z, int x, int y) {
-        String p = "/maps/";
+        String p = "/";
         p += style;
-        p += '/';
-        p += z;
         p += '/';
         p += x;
         p += '/';
         p += y;
+        p += '/';
+        p += z;
         p += ".png";
         return p;
     }

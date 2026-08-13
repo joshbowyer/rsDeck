@@ -993,8 +993,9 @@ static void printSerialHelp() {
 // =============================================================================
 // Tile-cache diagnostic (Stage 1 of offline-slippy-map feature)
 // =============================================================================
-// 'X' = list /maps/<style>/<z>/<x>/ on SD so the user can see what tiles exist
-//       and pick a (style,z,x,y) to test with 'x'.
+// 'X' = list /<mapset>/<x>/<y>/<z>.png on SD (SD root, x/y/z order — confirmed
+//       against the user's actual card) so the user can see what tiles exist
+//       and pick a (mapset,x,y,z) to test with 'x'.
 // 'x' = run a focused decode test: missing tile + guessed present tile;
 //       logs wall time, pump count, chunk latency, and first 8 RGB565 pixels.
 // =============================================================================
@@ -1004,55 +1005,57 @@ static void listSdMaps() {
         Serial.println("[SD] not ready");
         return;
     }
-    File dir = sdStore.openDir("/maps");
-    if (!dir || !dir.isDirectory()) {
-        Serial.println("[SD] /maps not present on card");
+    File root = sdStore.openDir("/");
+    if (!root || !root.isDirectory()) {
+        Serial.println("[SD] card not readable");
         return;
     }
-    Serial.println("[SD] /maps/ contents:");
-    File style = dir.openNextFile();
-    bool anyStyle = false;
-    while (style) {
-        if (style.isDirectory()) {
-            anyStyle = true;
-            // Descend one level to get the zoom dirs.
-            String stylePath = String("/maps/") + style.name();
-            File zdir = style.openNextFile();
-            // Re-open the directory (we consumed the iterator above).
-            zdir.close();
-            File styleDir = sdStore.openDir(stylePath.c_str());
-            if (styleDir && styleDir.isDirectory()) {
-                File z = styleDir.openNextFile();
-                while (z) {
-                    if (z.isDirectory()) {
-                        File zPath = sdStore.openDir((stylePath + "/" + z.name()).c_str());
-                        if (zPath && zPath.isDirectory()) {
-                            File x = zPath.openNextFile();
-                            int xCount = 0;
-                            while (x) { if (x.isDirectory()) ++xCount; x.close(); x = zPath.openNextFile(); }
-                            zPath.close();
-                            Serial.printf("[SD]   %s/%s/  (%d x-cols)\n",
-                                          style.name(), z.name(), xCount);
-                        }
+    Serial.println("[SD] mapsets at root:");
+    File mapset = root.openNextFile();
+    bool anyMapset = false;
+    while (mapset) {
+        if (mapset.isDirectory()) {
+            String mapsetName = String(mapset.name());
+            String mapsetPath = String("/") + mapsetName;
+            // Heuristic: a real mapset dir's first-level children are numeric
+            // x-index dirs. Skip anything that doesn't look like one (avoids
+            // misreporting unrelated top-level folders as mapsets).
+            File xdir = sdStore.openDir(mapsetPath.c_str());
+            if (xdir && xdir.isDirectory()) {
+                File x = xdir.openNextFile();
+                int xCount = 0;
+                bool looksLikeMapset = false;
+                while (x) {
+                    if (x.isDirectory()) {
+                        ++xCount;
+                        // isdigit-check the dir name to confirm x/y/z shape.
+                        const char* n = x.name();
+                        if (n && n[0] && isdigit((unsigned char)n[0])) looksLikeMapset = true;
                     }
-                    z.close();
-                    z = styleDir.openNextFile();
+                    x.close();
+                    x = xdir.openNextFile();
                 }
-                styleDir.close();
+                xdir.close();
+                if (looksLikeMapset) {
+                    anyMapset = true;
+                    Serial.printf("[SD]   %s/  (%d x-cols)\n", mapsetName.c_str(), xCount);
+                }
             }
         }
-        style.close();
-        style = dir.openNextFile();
+        mapset.close();
+        mapset = root.openNextFile();
     }
-    dir.close();
-    if (!anyStyle) Serial.println("[SD]   (no style subdirs)");
+    root.close();
+    if (!anyMapset) Serial.println("[SD]   (no mapset dirs found at root)");
 }
 
 static void runTileCacheTest() {
     // Pick a guess for the present tile. If the user has already run 'X' and
     // knows a real coord, they can edit TILE_GUESS below. The default targets
-    // the Basemapsxyz-OSM style at z=5/x=16/y=11 (a small low-zoom tile that
-    // is fast to decode and was confirmed on the user's SD card via 'X').
+    // the Basemapsxyz-OSM mapset at z=5/x=16/y=11 (a small low-zoom tile that
+    // is fast to decode). Note: on-disk path is /<mapset>/<x>/<y>/<z>.png
+    // (SD root, x/y/z order) — see TileStore.h; this struct's field order
+    // (style,z,x,y) is just the API parameter order, unrelated to path order.
     struct { const char* style; int z; int x; int y; } TILE_GUESS = {
         "Basemapsxyz-OSM", 5, 16, 11
     };
