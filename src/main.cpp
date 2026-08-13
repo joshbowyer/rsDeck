@@ -36,7 +36,7 @@
 #include "ui/screens/LvSettingsScreen.h"
 #include "ui/screens/LvHelpOverlay.h"
 #include "ui/screens/LvQrOverlay.h"
-// Map screen removed
+#include "ui/screens/LvMapScreen.h"
 #include "ui/screens/LvNameInputScreen.h"
 #include "ui/screens/LvTimezoneScreen.h"
 #include "ui/screens/LvDataCleanScreen.h"
@@ -130,7 +130,7 @@ LvMessageView lvMessageView;
 LvSettingsScreen lvSettingsScreen;
 LvHelpOverlay lvHelpOverlay;
 LvQrOverlay lvQrOverlay;
-// LvMapScreen removed
+LvMapScreen lvMapScreen;
 LvNameInputScreen lvNameInputScreen;
 LvTimezoneScreen lvTimezoneScreen;
 LvDataCleanScreen lvDataCleanScreen;
@@ -398,6 +398,13 @@ void onHotkeySettings() {
 }
 void onHotkeyAnnounce() {
     manualAnnounce();
+}
+void onHotkeyMap() {
+    // Open the offline slippy-map screen. The screen captures the active
+    // tab in onEnter() so the user can press Esc to return to where they
+    // were. Hidden behind Ctrl+L so it doesn't conflict with the bare-'c'
+    // keybinding the map screen itself uses to re-arm follow-GPS.
+    ui.setScreen(&lvMapScreen);
 }
 void onHotkeyAutoIface() {
     Serial.println("=== AUTOIFACE DUMP ===");
@@ -1503,6 +1510,7 @@ void setup() {
     hotkeys.registerHotkey('n', "New Message", onHotkeyNewMsg);
     hotkeys.registerHotkey('s', "Settings", onHotkeySettings);
     hotkeys.registerHotkey('a', "Announce", onHotkeyAnnounce);
+    hotkeys.registerHotkey('l', "Map", onHotkeyMap);
     hotkeys.registerHotkey('d', "Diagnostics", onHotkeyDiag);
     hotkeys.registerHotkey('i', "AutoIface dump", onHotkeyAutoIface);
     hotkeys.registerHotkey('t', "Radio Test", onHotkeyRadioTest);
@@ -2035,6 +2043,17 @@ void setup() {
     };
     lvSettingsScreen.setShowQrCallback(showQr);
     lvContactsScreen.setShowQrCallback(showQr);
+
+    // Map screen — wired with the lazy-allocated tile cache (no PSRAM
+    // cost until the user actually opens the screen) and the GPS manager
+    // for the follow-mode marker. setUIManager() lets the map screen
+    // route back to the previous tab on Esc without keeping a back-ref
+    // through some other channel.
+    lvMapScreen.setTileCache(&tileCache);
+#if HAS_GPS
+    lvMapScreen.setGPSManager(&gps);
+#endif
+    lvMapScreen.setUIManager(&ui);
 
     // LVGL help overlay
     lvHelpOverlay.create();
