@@ -993,7 +993,7 @@ static void printSerialHelp() {
 // =============================================================================
 // Tile-cache diagnostic (Stage 1 of offline-slippy-map feature)
 // =============================================================================
-// 'X' = list /<mapset>/<x>/<y>/<z>.png on SD (SD root, x/y/z order — confirmed
+// 'X' = list /maps/<mapset>/<x>/<y>/<z>.png on SD (x/y/z order — confirmed
 //       against the user's actual card) so the user can see what tiles exist
 //       and pick a (mapset,x,y,z) to test with 'x'.
 // 'x' = run a focused decode test: missing tile + guessed present tile;
@@ -1005,18 +1005,18 @@ static void listSdMaps() {
         Serial.println("[SD] not ready");
         return;
     }
-    File root = sdStore.openDir("/");
+    File root = sdStore.openDir("/maps");
     if (!root || !root.isDirectory()) {
-        Serial.println("[SD] card not readable");
+        Serial.println("[SD] /maps not present on card");
         return;
     }
-    Serial.println("[SD] mapsets at root:");
+    Serial.println("[SD] mapsets under /maps:");
     File mapset = root.openNextFile();
     bool anyMapset = false;
     while (mapset) {
         if (mapset.isDirectory()) {
             String mapsetName = String(mapset.name());
-            String mapsetPath = String("/") + mapsetName;
+            String mapsetPath = String("/maps/") + mapsetName;
             // Heuristic: a real mapset dir's first-level children are numeric
             // x-index dirs. Skip anything that doesn't look like one (avoids
             // misreporting unrelated top-level folders as mapsets).
@@ -1039,6 +1039,40 @@ static void listSdMaps() {
                 if (looksLikeMapset) {
                     anyMapset = true;
                     Serial.printf("[SD]   %s/  (%d x-cols)\n", mapsetName.c_str(), xCount);
+
+                    // Descend into the first x-dir -> first y-dir -> first
+                    // z.png file to print one REAL, verified-to-exist tile
+                    // coordinate the user can test with (avoids guessing).
+                    File x2 = sdStore.openDir(mapsetPath.c_str()).openNextFile();
+                    while (x2 && !x2.isDirectory()) x2 = File(); // safety, shouldn't happen
+                    File xdir2 = sdStore.openDir(mapsetPath.c_str());
+                    File firstX = xdir2.openNextFile();
+                    while (firstX && !firstX.isDirectory()) { firstX.close(); firstX = xdir2.openNextFile(); }
+                    if (firstX) {
+                        String xName = String(firstX.name());
+                        String xPath = mapsetPath + "/" + xName;
+                        firstX.close();
+                        File ydir = sdStore.openDir(xPath.c_str());
+                        File firstY = ydir.openNextFile();
+                        while (firstY && !firstY.isDirectory()) { firstY.close(); firstY = ydir.openNextFile(); }
+                        if (firstY) {
+                            String yName = String(firstY.name());
+                            String yPath = xPath + "/" + yName;
+                            firstY.close();
+                            File zdir = sdStore.openDir(yPath.c_str());
+                            File firstZ = zdir.openNextFile();
+                            while (firstZ && firstZ.isDirectory()) { firstZ.close(); firstZ = zdir.openNextFile(); }
+                            if (firstZ) {
+                                Serial.printf("[SD]     sample tile: %s/%s/%s/%s (x=%s y=%s z=%s)\n",
+                                              mapsetName.c_str(), xName.c_str(), yName.c_str(), firstZ.name(),
+                                              xName.c_str(), yName.c_str(), firstZ.name());
+                                firstZ.close();
+                            }
+                            zdir.close();
+                        }
+                        ydir.close();
+                    }
+                    xdir2.close();
                 }
             }
         }
@@ -1057,7 +1091,7 @@ static void runTileCacheTest() {
     // (SD root, x/y/z order) — see TileStore.h; this struct's field order
     // (style,z,x,y) is just the API parameter order, unrelated to path order.
     struct { const char* style; int z; int x; int y; } TILE_GUESS = {
-        "Basemapsxyz-OSM", 5, 16, 11
+        "Basemapsxyz-OSM", 1, 1, 1
     };
     Serial.println("[TILE-TEST] === TEST 1: missing tile (z=99) ===");
     if (!tileCache.requestTile("Basemapsxyz-OSM", 99, 0, 0, TileCache::Priority::PRIO_HIGH)) {

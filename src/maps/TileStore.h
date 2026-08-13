@@ -5,10 +5,10 @@
 // =============================================================================
 //
 // The on-disk layout (confirmed against the user's actual SD card, matches
-// Meshtastic MUI's MUIMapBuilder convention) lives at the SD card ROOT, not
-// under a /maps/ prefix, and nests x/y/z (NOT the more common z/x/y order):
-//      /<mapset>/<x>/<y>/<z>.png
-// e.g. /Basemapsxyz-OSM/512/340/10.png
+// Meshtastic MUI's MUIMapBuilder convention) lives under a /maps/ prefix and
+// nests x/y/z (NOT the more common z/x/y order):
+//      /maps/<mapset>/<x>/<y>/<z>.png
+// e.g. /maps/Basemapsxyz-OSM/512/340/10.png
 //
 // `mapset` is a free-form style name (e.g. "Basemapsxyz-OSM", "Esri-Satellite")
 // selectable in the UI. `x`, `y`, `z` are tile-coordinate integers (y=0 is the
@@ -28,9 +28,9 @@ class TileStore {
 public:
     // Build the absolute path string for a tile. The returned String is owned
     // by the caller; it is short-lived (just enough for the SD file open).
-    // Layout: /<mapset>/<x>/<y>/<z>.png (SD root, x/y/z order — see header note).
+    // Layout: /maps/<mapset>/<x>/<y>/<z>.png (x/y/z order — see header note).
     static String tilePath(const char* style, int z, int x, int y) {
-        String p = "/";
+        String p = "/maps/";
         p += style;
         p += '/';
         p += x;
