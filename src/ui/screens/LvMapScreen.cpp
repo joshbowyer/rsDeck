@@ -8,6 +8,7 @@
 #include "ui/Theme.h"
 #include "ui/UIManager.h"
 #include "ui/LvTabBar.h"
+#include "ui/LvTheme.h"
 #include <Arduino.h>
 #include <cstdlib>
 #include <cstring>
@@ -48,6 +49,42 @@ constexpr int kHudGpsX = 196;
 constexpr int kHudGpsY = 174;
 
 constexpr int kMarkerSize = 14;
+
+// ---- Nav overlay layout ----
+//
+// Six small buttons (4 directional arrows + 2 zoom) clustered in the
+// bottom-right corner of the content area. Free area there is bounded
+// by the FOLLOW HUD at the top (y=2..16) and the GPS HUD at the bottom
+// (y=174..188), so we have roughly y=20..172 to work with.
+//
+// Layout (each button 22x16, 2-px gaps):
+//
+//         [   UP   ]                  (col 1, row 0)
+//         [ L ][ R ]                  (col 0 / col 2, row 1)
+//         [  DN  ]                    (col 1, row 2)
+//         [  +  ]                    (col 1, row 3)
+//         [  -  ]                    (col 1, row 4)
+//
+// Cluster origin (content-area coords) and footprint:
+//   origin = (kNavOriginX, kNavOriginY)
+//   width  = 3 * 22 + 2 * 2 = 70
+//   height = 5 * 16 + 4 * 2 = 88
+//
+// Right edge at 246 + 70 = 316 leaves a 4 px gap to CONTENT_W=320.
+// Bottom edge at 80 + 88 = 168 leaves a 6 px gap to GPS HUD at y=174.
+constexpr int kNavBtnW     = 22;
+constexpr int kNavBtnH     = 16;
+constexpr int kNavBtnGap   = 2;
+constexpr int kNavOriginX  = 246;
+constexpr int kNavOriginY  = 80;
+constexpr int kNavColCenter = kNavOriginX + kNavBtnW + kNavBtnGap;       // 270
+constexpr int kNavColLeft   = kNavOriginX;                              // 246
+constexpr int kNavColRight  = kNavOriginX + 2 * (kNavBtnW + kNavBtnGap);  // 292
+constexpr int kNavRow0 = kNavOriginY;                                   //  80  (UP)
+constexpr int kNavRow1 = kNavOriginY + 1 * (kNavBtnH + kNavBtnGap);      //  98  (L,R)
+constexpr int kNavRow2 = kNavOriginY + 2 * (kNavBtnH + kNavBtnGap);      // 116  (DN)
+constexpr int kNavRow3 = kNavOriginY + 3 * (kNavBtnH + kNavBtnGap);      // 134  (+)
+constexpr int kNavRow4 = kNavOriginY + 4 * (kNavBtnH + kNavBtnGap);      // 152  (-)
 
 // ---- Debug logging gate ----
 //
@@ -156,9 +193,79 @@ void LvMapScreen::createUI(lv_obj_t* parent) {
                               &lv_font_rsdeck_10, Theme::TEXT_SECONDARY,
                               _followGPS ? "FOLLOW" : "MANUAL");
 
+    // ---- Nav overlay (D-pad + zoom) ----
+    // Created AFTER HUD labels so they're drawn on top. The GPS marker
+    // is created AFTER this block (below) so it sits on top of nav
+    // buttons — a marker that happens to land under a button still shows.
+    // Each button reuses the shared LvTheme button styles so it follows
+    // any future palette tweaks (Light scheme, etc).
+    auto makeNavBtn = [&](int idx, int x, int y, const char* sym, lv_event_cb_t cb) {
+        lv_obj_t* btn = lv_btn_create(parent);
+        lv_obj_set_size(btn, kNavBtnW, kNavBtnH);
+        lv_obj_set_pos(btn, x, y);
+        lv_obj_add_style(btn, LvTheme::styleBtn(), 0);
+        lv_obj_add_style(btn, LvTheme::styleBtnPressed(), LV_STATE_PRESSED);
+        // Subtler than full opaque BG_ELEVATED so the buttons don't
+        // visually dominate the map. Opacity ~70% lets the underlying
+        // tile imagery show through; the BG color stays BG_ELEVATED
+        // so the contrast against the map is preserved.
+        lv_obj_set_style_bg_opa(btn, LV_OPA_70, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(Theme::BORDER), 0);
+        lv_obj_set_style_radius(btn, 3, 0);
+        lv_obj_set_style_pad_all(btn, 0, 0);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        // Label uses LVGL's built-in FontAwesome glyphs (the
+        // lv_font_montserrat_12 range covers them; see LvTabBar.cpp).
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(Theme::TEXT_PRIMARY), 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(Theme::ACCENT), LV_STATE_PRESSED);
+        lv_label_set_text(lbl, sym);
+        lv_obj_center(lbl);
+        lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, this);
+        _navBtns[idx] = btn;
+        // Cache screen-absolute bounds so refreshUI()'s touch hit test
+        // can compare raw touch coords directly. The content parent is
+        // positioned at y=STATUS_BAR_H by UIManager, so add it.
+        _navBtnX1[idx] = x;
+        _navBtnY1[idx] = y + Theme::STATUS_BAR_H;
+        _navBtnX2[idx] = x + kNavBtnW - 1;
+        _navBtnY2[idx] = y + kNavBtnH - 1 + Theme::STATUS_BAR_H;
+        return btn;
+    };
+    makeNavBtn(NAV_BTN_LEFT,  kNavColLeft,   kNavRow1, LV_SYMBOL_LEFT,  [](lv_event_t* e){
+        auto* self = (LvMapScreen*)lv_event_get_user_data(e);
+        self->panBy( 32, 0); self->rebuildTiles();
+    });
+    makeNavBtn(NAV_BTN_UP,    kNavColCenter, kNavRow0, LV_SYMBOL_UP,    [](lv_event_t* e){
+        auto* self = (LvMapScreen*)lv_event_get_user_data(e);
+        self->panBy(0,  32); self->rebuildTiles();
+    });
+    makeNavBtn(NAV_BTN_RIGHT, kNavColRight,  kNavRow1, LV_SYMBOL_RIGHT, [](lv_event_t* e){
+        auto* self = (LvMapScreen*)lv_event_get_user_data(e);
+        self->panBy(-32, 0); self->rebuildTiles();
+    });
+    makeNavBtn(NAV_BTN_DOWN,  kNavColCenter, kNavRow2, LV_SYMBOL_DOWN,  [](lv_event_t* e){
+        auto* self = (LvMapScreen*)lv_event_get_user_data(e);
+        self->panBy(0, -32); self->rebuildTiles();
+    });
+    makeNavBtn(NAV_BTN_ZIN,   kNavColCenter, kNavRow3, LV_SYMBOL_PLUS,  [](lv_event_t* e){
+        auto* self = (LvMapScreen*)lv_event_get_user_data(e);
+        self->zoomIn(); self->rebuildTiles();
+    });
+    makeNavBtn(NAV_BTN_ZOUT,  kNavColCenter, kNavRow4, LV_SYMBOL_MINUS, [](lv_event_t* e){
+        auto* self = (LvMapScreen*)lv_event_get_user_data(e);
+        self->zoomOut(); self->rebuildTiles();
+    });
+
     // ---- GPS marker (separate overlay, NOT baked into the tile grid) ----
-    // A small filled circle. We don't use a canvas — a plain lv_obj with
-    // circular styling is cheaper and perfectly fine for one static dot.
+    // A small filled circle. Created LAST so it sits on top of EVERY
+    // other widget (tiles, HUD, nav buttons) — a marker that happens
+    // to be positioned under a nav button still shows through.
+    // We don't use a canvas — a plain lv_obj with circular styling is
+    // cheaper and perfectly fine for one static dot.
     _marker = lv_obj_create(parent);
     lv_obj_set_size(_marker, kMarkerSize, kMarkerSize);
     lv_obj_set_pos(_marker, 0, 0);
@@ -200,6 +307,9 @@ void LvMapScreen::destroyUI() {
     _hudMapset = nullptr;
     _hudGps = nullptr;
     _hudFollow = nullptr;
+    for (int i = 0; i < NAV_BTN_COUNT; ++i) {
+        _navBtns[i] = nullptr;
+    }
     for (int i = 0; i < SLOT_COUNT; ++i) {
         _slots[i].bg = nullptr;
         _slots[i].img = nullptr;
@@ -218,6 +328,7 @@ void LvMapScreen::onEnter() {
     _noTilesToastPendingMs = 0;
     _touchActive = false;
     _touchDoubleArmed = false;
+    _touchConsumedByNav = false;
 
     // Remember which tab the user came from so Esc can put them back.
     if (_ui) _prevTab = _ui->lvTabBar().getActiveTab();
@@ -282,6 +393,12 @@ void LvMapScreen::refreshUI() {
     // 2. Touch handling — single-point GT911, no pinch possible.
     //    Drag = pan (delta of touch.x/y while isTouched). Two taps
     //    within DOUBLE_TAP_MS / DOUBLE_TAP_RADIUS_PX = zoom in.
+    //
+    //    The nav overlay buttons consume their own touches via LVGL's
+    //    CLICKED event. We also need to suppress the manual pan/double-tap
+    //    logic for touches that landed on a nav button, otherwise a quick
+    //    double-tap on a button could be misinterpreted as a map-screen
+    //    double-tap and trigger an unwanted zoom-in.
     static bool wasTouched = false;
     static int16_t downX = 0, downY = 0;
     static unsigned long downMs = 0;
@@ -299,6 +416,17 @@ void LvMapScreen::refreshUI() {
             lastTouchX = tx;
             lastTouchY = ty;
             _touchActive = true;
+            // Mark this touch as owned by the nav overlay if it landed
+            // on a button. The LVGL CLICKED event will fire on release
+            // (button handler does the actual pan/zoom); we just need to
+            // keep our manual pan/double-tap logic out of the way for
+            // the duration of this touch.
+            _touchConsumedByNav = isTouchOnNavButton(tx, ty);
+            if (_touchConsumedByNav) {
+                // Skip double-tap arming so a quick tap on a button
+                // doesn't count toward a future map-screen double-tap.
+                return;
+            }
 
             if (_touchDoubleArmed &&
                 now - _touchDoubleMs <= DOUBLE_TAP_MS &&
@@ -314,7 +442,16 @@ void LvMapScreen::refreshUI() {
                 _touchDoubleMs = now;
             }
         } else {
-            // Touch-move: pan based on delta from last position
+            // Touch-move: pan based on delta from last position.
+            // Skip if the touch-down landed on a nav button — even if
+            // the user drags off the button mid-touch (LVGL cancels
+            // the click event in that case), we don't want the pan
+            // logic to kick in.
+            if (_touchConsumedByNav) {
+                lastTouchX = tx;
+                lastTouchY = ty;
+                return;
+            }
             int16_t dxT = tx - lastTouchX;
             int16_t dyT = ty - lastTouchY;
             if (dxT != 0 || dyT != 0) {
@@ -332,6 +469,7 @@ void LvMapScreen::refreshUI() {
         // (so a long press doesn't get misinterpreted as two taps).
         wasTouched = false;
         _touchActive = false;
+        _touchConsumedByNav = false;
         if (now - downMs > DOUBLE_TAP_MS) {
             _touchDoubleArmed = false;
         }
@@ -498,6 +636,29 @@ void LvMapScreen::rebuildTiles() {
     int32_t txMin = tl.x - 1;
     int32_t tyMin = tl.y;
 
+    // At low zoom the world is smaller than the viewport AND smaller
+    // than the 3x2 buffer grid. The buffer formula above yields
+    // tile (tx,ty) keys that are outside the actual world — e.g. at
+    // z=0 the world is just one tile (0,0), but txMin can be -1 and
+    // tyMin can be 1, so we end up requesting tiles (-1,0), (1,0),
+    // (-1,1), (0,1), (1,1) that CANNOT exist on the SD card. The
+    // visible symptom was: the world tile (0,0) loaded and rendered
+    // fine, but the rest of the viewport showed gray placeholders
+    // (because the slots were "missing") — looking to the user like
+    // "tiles should exist but don't load".
+    //
+    // We can't just clamp the grid down to a 1x1 at z=0 without losing
+    // the buffer behavior at higher zooms, but we CAN:
+    //   1. Skip out-of-world tiles entirely (no request, no probe).
+    //   2. Hide the placeholder for those slots so they don't cover the
+    //      viewport with confusing gray boxes.
+    // This still places the in-world tiles correctly via the same buffer
+    // formula; it just turns off the slots that fall outside the world.
+    const int32_t worldTiles = (_zoom >= 0 && _zoom < 31) ? ((int32_t)1 << _zoom) : 1;
+    auto isInWorld = [&](int32_t tx, int32_t ty) {
+        return tx >= 0 && ty >= 0 && tx < worldTiles && ty < worldTiles;
+    };
+
     // Reset the "saw any ready tile this rebuild" flag. Used by the
     // "no tiles for this area" toast in refreshUI() — fires if the
     // current view has no READY tiles for >2.5s after the request was
@@ -523,8 +684,45 @@ void LvMapScreen::rebuildTiles() {
             int32_t tx = txMin + col;
             int32_t ty = tyMin + row;
 
+            // Low-zoom guard: tiles outside the world at this zoom are
+            // physically impossible (the SD can never have a /x/y/z.png
+            // for them). Hide the slot entirely so the user doesn't see
+            // a confusing gray placeholder where the world doesn't even
+            // extend to. requestVisibleTiles() also skips these, so the
+            // negative cache stays clean.
+            if (!isInWorld(tx, ty)) {
+                if (s.bg && !lv_obj_has_flag(s.bg, LV_OBJ_FLAG_HIDDEN)) {
+                    lv_obj_add_flag(s.bg, LV_OBJ_FLAG_HIDDEN);
+                }
+                if (s.img && !lv_obj_has_flag(s.img, LV_OBJ_FLAG_HIDDEN)) {
+                    lv_obj_add_flag(s.img, LV_OBJ_FLAG_HIDDEN);
+                }
+                s.curDsc = nullptr;
+                // Keep tz == _zoom so requestVisibleTiles()'s "slot is being
+                // repopulated this tick" check still works; the out-of-world
+                // skip happens in requestVisibleTiles() via isInWorld().
+                s.tx = tx;
+                s.ty = ty;
+                s.tz = _zoom;
+                MAP_LOG("[MAP] slot %d z=%d x=%d y=%d -> OUT-OF-WORLD (hidden)\n",
+                        idx, _zoom, tx, ty);
+                continue;
+            }
+
             int32_t sx, sy;
             tileScreenPos(tx, ty, sx, sy);
+
+            // Make sure bg/img are un-hidden when transitioning back
+            // into the world (e.g. zoom-in from a low zoom where this
+            // slot was hidden).
+            if (s.bg && lv_obj_has_flag(s.bg, LV_OBJ_FLAG_HIDDEN)) {
+                lv_obj_clear_flag(s.bg, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (s.img && lv_obj_has_flag(s.img, LV_OBJ_FLAG_HIDDEN) &&
+                s.curDsc == nullptr) {
+                // Leave hidden if curDsc is non-null — the next block
+                // will clear the flag when it re-attaches the dsc.
+            }
 
             // Move bg + img to the new screen position. Tiles outside
             // the viewport get negative or >VIEW_W coords — LVGL's
@@ -577,11 +775,19 @@ void LvMapScreen::rebuildTiles() {
 
 void LvMapScreen::requestVisibleTiles() {
     if (!_tileCache) return;
+    // Mirror rebuildTiles()'s world-bounds check so we don't fill the
+    // negative cache with bogus out-of-world (z,x,y) keys at low zoom.
+    const int32_t worldTiles = (_zoom >= 0 && _zoom < 31) ? ((int32_t)1 << _zoom) : 1;
     int requested = 0;
     int deduped = 0;
+    int skippedOOW = 0;
     for (int i = 0; i < SLOT_COUNT; ++i) {
         TileSlot& s = _slots[i];
         if (s.tz != _zoom) continue;  // slot is being repopulated this tick
+        if (s.tx < 0 || s.ty < 0 || s.tx >= worldTiles || s.ty >= worldTiles) {
+            ++skippedOOW;
+            continue;  // out-of-world: never exists on SD
+        }
         // requestTile() returns false only if the request was deduped OR
         // the (z,x,y) is in the negative cache. Both are "no work needed",
         // but they're different from "queue full" so we don't fail loudly.
@@ -592,8 +798,31 @@ void LvMapScreen::requestVisibleTiles() {
             ++deduped;
         }
     }
-    MAP_LOG("[MAP] requestVisibleTiles z=%d requested=%d deduped_or_neg=%d\n",
-            _zoom, requested, deduped);
+    MAP_LOG("[MAP] requestVisibleTiles z=%d requested=%d deduped_or_neg=%d out_of_world=%d\n",
+            _zoom, requested, deduped, skippedOOW);
+}
+
+// ---- Nav overlay hit test ----
+
+bool LvMapScreen::isTouchOnNavButton(int16_t tx, int16_t ty) const {
+    // Bounds are populated once in createUI() and are screen-absolute.
+    // No allocation, no LVGL calls — safe to invoke from refreshUI()'s
+    // touch path on every iteration.
+    for (int i = 0; i < NAV_BTN_COUNT; ++i) {
+        if (!_navBtns[i]) continue;
+        if (tx >= _navBtnX1[i] && tx <= _navBtnX2[i] &&
+            ty >= _navBtnY1[i] && ty <= _navBtnY2[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void LvMapScreen::rebuildNavOverlay() {
+    // Currently a no-op — button layout is fixed and doesn't depend on
+    // zoom/pan/theme. Kept for future use (e.g. hiding the overlay in
+    // a follow-GPS-on-wide-view mode, or repositioning when an overlay
+    // toast is visible).
 }
 
 // ---- GPS marker / follow ----

@@ -178,14 +178,48 @@ private:
     lv_obj_t* _mapContainer = nullptr;  // clipped parent for tile slots
     TileSlot _slots[SLOT_COUNT];
 
-    // HUD overlay (above tiles, below GPS marker)
+    // HUD overlay (above tiles, below nav buttons)
     lv_obj_t* _hudZoom = nullptr;
     lv_obj_t* _hudMapset = nullptr;
     lv_obj_t* _hudGps = nullptr;
     lv_obj_t* _hudFollow = nullptr;
 
-    // GPS marker — separate obj, drawn on top of the tile grid so panning
-    // never touches it.
+    // ---- Nav overlay (D-pad + zoom) — small buttons over the map so the
+    // user has a discoverable pan/zoom alternative to the trackball and
+    // touch-drag. Six buttons total: 4 directional arrows + 2 zoom. Wire
+    // each LV_EVENT_CLICKED to the existing panBy/zoomIn/zoomOut methods
+    // (no reimplementation). Positioning is bottom-right (above the GPS
+    // HUD at y=174, below the FOLLOW HUD at y=2) to avoid overlap with
+    // HUD labels. Stays BELOW the GPS marker in z-order so a marker on
+    // top of a button doesn't get visually clipped.
+    static constexpr int NAV_BTN_COUNT = 6;
+    enum NavBtn : int {
+        NAV_BTN_LEFT = 0,
+        NAV_BTN_UP,
+        NAV_BTN_RIGHT,
+        NAV_BTN_DOWN,
+        NAV_BTN_ZIN,
+        NAV_BTN_ZOUT,
+    };
+    lv_obj_t* _navBtns[NAV_BTN_COUNT] = {nullptr};
+    // Cache each button's screen-absolute bounds (touch.x()/touch.y()
+    // return raw screen coords, not LVGL-parent-relative coords; the
+    // nav-button hit test in refreshUI() needs screen-absolute bounds).
+    // Recomputed in rebuildNavOverlay().
+    int16_t _navBtnX1[NAV_BTN_COUNT] = {0};
+    int16_t _navBtnY1[NAV_BTN_COUNT] = {0};
+    int16_t _navBtnX2[NAV_BTN_COUNT] = {0};
+    int16_t _navBtnY2[NAV_BTN_COUNT] = {0};
+    // Set true when the current touch-down was inside a nav button; the
+    // manual pan/double-tap handler skips pan and double-tap detection
+    // while this is set, so tapping a button doesn't accidentally pan
+    // or trigger a double-tap zoom.
+    bool _touchConsumedByNav = false;
+    bool isTouchOnNavButton(int16_t tx, int16_t ty) const;
+    void rebuildNavOverlay();
+
+    // GPS marker — separate obj, drawn on top of EVERYTHING (including
+    // nav buttons) so a marker under a button still shows through.
     lv_obj_t* _marker = nullptr;
 
     // ---- Input state ----

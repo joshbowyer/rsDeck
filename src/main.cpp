@@ -1003,7 +1003,24 @@ static void printSerialHelp() {
 //       and pick a (mapset,x,y,z) to test with 'x'.
 // 'x' = run a focused decode test: missing tile + guessed present tile;
 //       logs wall time, pump count, chunk latency, and first 8 RGB565 pixels.
+//
+// Extended (Bug 1 follow-up): per-zoom tile count + x/y range for each
+// mapset, so a user can confirm whether the SD has full-coverage tiles at
+// low zooms (z=0..3) or only partial coverage in some (x,y) range. The
+// output lets the user distinguish "tiles exist but don't load" (a code
+// bug) from "tiles don't exist for this view" (a data-coverage gap).
 // =============================================================================
+
+#include <vector>
+#include <algorithm>
+#include <climits>
+
+struct ZoomCoverage {
+    int z = -1;
+    int count = 0;
+    int xMin = INT_MAX, xMax = -1;
+    int yMin = INT_MAX, yMax = -1;
+};
 
 static void listSdMaps() {
     if (!sdStore.isReady()) {
@@ -1045,6 +1062,66 @@ static void listSdMaps() {
                     anyMapset = true;
                     Serial.printf("[SD]   %s/  (%d x-cols)\n", mapsetName.c_str(), xCount);
 
+                    // ---- Per-zoom tile enumeration ----
+                    // For each x-dir: open it, for each y-dir inside it:
+                    // open it, for each z.png file: parse the basename
+                    // ("<z>.png") as the zoom level and the y-dir/x-dir
+                    // as the (y,x) coords. Aggregate per-zoom counts
+                    // and (x,y) bounds.
+                    std::vector<ZoomCoverage> cov;
+                    auto getOrCreate = [&](int z) -> ZoomCoverage& {
+                        for (auto& c : cov) if (c.z == z) return c;
+                        cov.push_back({z, 0, INT_MAX, INT_MIN, INT_MAX, INT_MIN});
+                        return cov.back();
+                    };
+                    File xdir3 = sdStore.openDir(mapsetPath.c_str());
+                    File xf = xdir3.openNextFile();
+                    while (xf) {
+                        if (!xf.isDirectory()) { xf.close(); xf = xdir3.openNextFile(); continue; }
+                        int xCoord = atoi(xf.name());
+                        String xPath3 = mapsetPath + "/" + xf.name();
+                        xf.close();
+                        File ydir3 = sdStore.openDir(xPath3.c_str());
+                        File yf = ydir3.openNextFile();
+                        while (yf) {
+                            if (!yf.isDirectory()) { yf.close(); yf = ydir3.openNextFile(); continue; }
+                            int yCoord = atoi(yf.name());
+                            String yPath3 = xPath3 + "/" + yf.name();
+                            yf.close();
+                            File zdir3 = sdStore.openDir(yPath3.c_str());
+                            File zf = zdir3.openNextFile();
+                            while (zf) {
+                                if (!zf.isDirectory()) {
+                                    // z.png is a file — parse the basename "z.png"
+                                    const char* fname = zf.name();
+                                    if (fname) {
+                                        int zCoord = atoi(fname);  // atoi("0.png") -> 0
+                                        if (zCoord >= 0 && zCoord <= 22) {
+                                            ZoomCoverage& c = getOrCreate(zCoord);
+                                            ++c.count;
+                                            if (xCoord < c.xMin) c.xMin = xCoord;
+                                            if (xCoord > c.xMax) c.xMax = xCoord;
+                                            if (yCoord < c.yMin) c.yMin = yCoord;
+                                            if (yCoord > c.yMax) c.yMax = yCoord;
+                                        }
+                                    }
+                                }
+                                zf.close();
+                                zf = zdir3.openNextFile();
+                            }
+                            zdir3.close();
+                            yf = ydir3.openNextFile();
+                        }
+                        ydir3.close();
+                        xf = xdir3.openNextFile();
+                    }
+                    xdir3.close();
+
+                    // Sort by zoom ascending for readable output.
+                    std::sort(cov.begin(), cov.end(),
+                              [](const ZoomCoverage& a, const ZoomCoverage& b){ return a.z < b.z; });
+
+                    // ---- Existing single-sample-tile listing ----
                     // Descend into the first x-dir -> first y-dir -> first
                     // z.png file to print one REAL, verified-to-exist tile
                     // coordinate the user can test with (avoids guessing).
@@ -1078,6 +1155,24 @@ static void listSdMaps() {
                         ydir.close();
                     }
                     xdir2.close();
+
+                    // ---- Print per-zoom coverage ----
+                    // The format is "z=N: count=NNN x=[min..max]/2^z y=[min..max]/2^z"
+                    // so the user can see at-a-glance whether each zoom has
+                    // FULL world coverage (count == 4^z and x/y ranges == [0, 2^z))
+                    // or PARTIAL coverage (which is the typical case for basemap
+                    // z=6+ caches that have been stitched together).
+                    Serial.printf("[SD]     per-zoom coverage for %s:\n", mapsetName.c_str());
+                    for (const auto& c : cov) {
+                        int32_t expected = (c.z >= 0 && c.z < 16) ? ((int32_t)1 << (2 * c.z)) : -1;
+                        const char* status = (expected > 0 && c.count >= expected) ? "FULL"
+                                            : (c.count == 0) ? "EMPTY"
+                                            : "PARTIAL";
+                        Serial.printf("[SD]       z=%2d: count=%-6d x=[%d..%d] y=[%d..%d]  %s%s\n",
+                                      c.z, c.count, c.xMin, c.xMax, c.yMin, c.yMax, status,
+                                      (expected > 0 && c.count < expected) ?
+                                          String(" (expected up to " + String(expected) + " for full world)").c_str() : "");
+                    }
                 }
             }
         }
