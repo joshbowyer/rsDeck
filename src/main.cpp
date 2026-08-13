@@ -43,6 +43,7 @@
 #include "storage/FlashStore.h"
 #include "storage/SDStore.h"
 #include "storage/MessageStore.h"
+#include "maps/TileCache.h"
 #include "reticulum/ReticulumManager.h"
 #include "reticulum/AnnounceManager.h"
 #include "reticulum/LXMFManager.h"
@@ -94,6 +95,7 @@ HotkeyManager hotkeys;
 UIManager ui;
 FlashStore flash;
 SDStore sdStore;
+TileCache tileCache;
 MessageStore messageStore;
 ReticulumManager rns;
 AnnounceManager* announceManager = nullptr;
@@ -982,10 +984,131 @@ static void handleSerialLineCommand(const char* line) {
 }
 
 static void printSerialHelp() {
-    Serial.println("[SERIAL] commands: ? help | a announce | t raw-test | d diag | r rssi | i irq | p tx-power-cycle | m min-power | q iq | b battery | g telemetry-send | V telemetry-status | +/- freq");
+    Serial.println("[SERIAL] commands: ? help | a announce | t raw-test | d diag | r rssi | i irq | p tx-power-cycle | m min-power | q iq | b battery | g telemetry-send | V telemetry-status | x tile-test | X tile-ls | +/- freq");
     Serial.println("[SERIAL] line commands: F<hz> exact-frequency | P<dBm> exact-tx-power | L<len> [dest_hash] LXMF test | B<ratio> set-adc-divider-ratio | G<32hex> telemetry-hub");
     Serial.println("[SERIAL] lite relay diag: H<len> [dest] Header2 data | J [dest] linkreq | K<ctx_hex> link-data | Y<ctx_hex> link-proof");
     telemetryManager.printHelp();
+}
+
+// =============================================================================
+// Tile-cache diagnostic (Stage 1 of offline-slippy-map feature)
+// =============================================================================
+// 'X' = list /maps/<style>/<z>/<x>/ on SD so the user can see what tiles exist
+//       and pick a (style,z,x,y) to test with 'x'.
+// 'x' = run a focused decode test: missing tile + guessed present tile;
+//       logs wall time, pump count, chunk latency, and first 8 RGB565 pixels.
+// =============================================================================
+
+static void listSdMaps() {
+    if (!sdStore.isReady()) {
+        Serial.println("[SD] not ready");
+        return;
+    }
+    File dir = sdStore.openDir("/maps");
+    if (!dir || !dir.isDirectory()) {
+        Serial.println("[SD] /maps not present on card");
+        return;
+    }
+    Serial.println("[SD] /maps/ contents:");
+    File style = dir.openNextFile();
+    bool anyStyle = false;
+    while (style) {
+        if (style.isDirectory()) {
+            anyStyle = true;
+            // Descend one level to get the zoom dirs.
+            String stylePath = String("/maps/") + style.name();
+            File zdir = style.openNextFile();
+            // Re-open the directory (we consumed the iterator above).
+            zdir.close();
+            File styleDir = sdStore.openDir(stylePath.c_str());
+            if (styleDir && styleDir.isDirectory()) {
+                File z = styleDir.openNextFile();
+                while (z) {
+                    if (z.isDirectory()) {
+                        File zPath = sdStore.openDir((stylePath + "/" + z.name()).c_str());
+                        if (zPath && zPath.isDirectory()) {
+                            File x = zPath.openNextFile();
+                            int xCount = 0;
+                            while (x) { if (x.isDirectory()) ++xCount; x.close(); x = zPath.openNextFile(); }
+                            zPath.close();
+                            Serial.printf("[SD]   %s/%s/  (%d x-cols)\n",
+                                          style.name(), z.name(), xCount);
+                        }
+                    }
+                    z.close();
+                    z = styleDir.openNextFile();
+                }
+                styleDir.close();
+            }
+        }
+        style.close();
+        style = dir.openNextFile();
+    }
+    dir.close();
+    if (!anyStyle) Serial.println("[SD]   (no style subdirs)");
+}
+
+static void runTileCacheTest() {
+    // Pick a guess for the present tile. If the user has already run 'X' and
+    // knows a real coord, they can edit TILE_GUESS below. The default targets
+    // the Basemapsxyz-OSM style at z=5/x=16/y=11 (a small low-zoom tile that
+    // is fast to decode and was confirmed on the user's SD card via 'X').
+    struct { const char* style; int z; int x; int y; } TILE_GUESS = {
+        "Basemapsxyz-OSM", 5, 16, 11
+    };
+    Serial.println("[TILE-TEST] === TEST 1: missing tile (z=99) ===");
+    if (!tileCache.requestTile("Basemapsxyz-OSM", 99, 0, 0, TileCache::Priority::PRIO_HIGH)) {
+        Serial.println("[TILE-TEST] missing: enqueue failed (queue full)");
+    }
+    unsigned long t0 = millis();
+    int pumps = 0;
+    while (millis() - t0 < 5000) {
+        tileCache.pump();
+        ++pumps;
+        if (tileCache.getTileIfReady("Basemapsxyz-OSM", 99, 0, 0) != nullptr) break;
+    }
+    unsigned long elapsed = millis() - t0;
+    const lv_img_dsc_t* dscNeg = tileCache.getTileIfReady("Basemapsxyz-OSM", 99, 0, 0);
+    Serial.printf("[TILE-TEST] missing: pumps=%d elapsed=%lu ms ready=%s\n",
+                  pumps, (unsigned long)elapsed, dscNeg ? "YES" : "no (good - never marked READY)");
+
+    Serial.println("[TILE-TEST] === TEST 2: present tile (GUESS) ===");
+    Serial.printf("[TILE-TEST] guessing /maps/%s/%d/%d/%d.png\n",
+                  TILE_GUESS.style, TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y);
+    if (!tileCache.requestTile(TILE_GUESS.style, TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y, TileCache::Priority::PRIO_HIGH)) {
+        Serial.println("[TILE-TEST] present: enqueue failed");
+    }
+    t0 = millis();
+    pumps = 0;
+    while (millis() - t0 < 5000) {
+        tileCache.pump();
+        ++pumps;
+        if (tileCache.getTileIfReady(TILE_GUESS.style, TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y) != nullptr) break;
+    }
+    elapsed = millis() - t0;
+    const lv_img_dsc_t* dsc = tileCache.getTileIfReady(TILE_GUESS.style, TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y);
+    if (dsc) {
+        Serial.printf("[TILE-TEST] present: pumps=%d elapsed=%lu ms OK\n",
+                      pumps, (unsigned long)elapsed);
+        Serial.printf("[TILE-TEST] tile=%p w=%u h=%u data_size=%u cf=%d\n",
+                      (const void*)dsc, dsc->header.w, dsc->header.h,
+                      dsc->data_size, (int)dsc->header.cf);
+        const uint16_t* px = (const uint16_t*)dsc->data;
+        Serial.printf("[TILE-TEST] first 8 px (RGB565, hex): ");
+        for (int i = 0; i < 8; ++i) {
+            Serial.printf("0x%04x ", (unsigned)(px[i] & 0xFFFF));
+        }
+        Serial.println();
+    } else {
+        Serial.printf("[TILE-TEST] present: pumps=%d elapsed=%lu ms NOT-READY (file probably absent on SD)\n",
+                      pumps, (unsigned long)elapsed);
+        Serial.println("[TILE-TEST] run 'X' to see what tiles are actually on the SD card");
+    }
+    Serial.printf("[TILE-TEST] chunk latency: last=%lu ms max=%lu ms total_pumps=%lu\n",
+                  (unsigned long)tileCache.lastPumpMs(),
+                  (unsigned long)tileCache.maxPumpMs(),
+                  (unsigned long)tileCache.pumpCount());
+    tileCache.dumpStatus();
 }
 
 static void onHotkeyBatteryDiag() {
@@ -1091,6 +1214,12 @@ static void handleSerialCommands() {
                 // Avoided 'T' because it is already mapped to
                 // onHotkeyRadioTest() at the case 't'/'T' branch above.
                 telemetryManager.handleSerial('V', nullptr);
+                break;
+            case 'x':
+                runTileCacheTest();
+                break;
+            case 'X':
+                listSdMaps();
                 break;
             case '+':
             case '=':
@@ -1246,6 +1375,7 @@ void setup() {
     } else {
         Serial.println("[SD] Not detected");
     }
+    tileCache.begin(&sdStore);
     bootTraceStage("sd-probe");
 
     // Verify radio SPI still works after SD init
@@ -2159,6 +2289,11 @@ void loop() {
     if (announceManager) announceManager->loop();
     audio.loop();
     telemetryManager.loop();
+    // 6.5 Tile cache pump — one chunk per main-loop iteration. The pump()'s
+    //     own internal ~20-25ms budget is enforced well below the LoRa packet
+    //     airtime, so a stalled packet is overwritten by the next one only
+    //     if the radio is configured for sub-30ms airtimes (rare).
+    tileCache.pump();
 
     // 7. WiFi STA connection handler
     if (wifiSTAStarted) {

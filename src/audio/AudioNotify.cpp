@@ -1,6 +1,7 @@
 // Audio output for T-Deck Plus via I2S speaker amplifier
 #include "AudioNotify.h"
 #include "config/BoardConfig.h"
+#include "config/Config.h"
 #include <driver/i2s.h>
 #include <math.h>
 
@@ -167,6 +168,9 @@ void AudioNotify::playError() {
 
 void AudioNotify::playBoot() {
     if (!_enabled || !_i2sReady) return;
+#if !RSDECK_PLAY_BOOT_SOUND
+    return;
+#endif
 
     // === RSDECK BOOT SEQUENCE ===
     // Sci-fi computer startup: sweep -> digital arpeggio -> confirmation

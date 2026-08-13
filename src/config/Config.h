@@ -40,6 +40,13 @@
 #define RSDECK_BRAND_TEXT "Ratspeak.org"
 #endif
 
+// Boot chime. Override to 0 locally via platformio_override.ini with:
+//   build_flags = -DRSDECK_PLAY_BOOT_SOUND=0
+// Left at the project default (1) here so upstream builds/PRs always retain it.
+#ifndef RSDECK_PLAY_BOOT_SOUND
+#define RSDECK_PLAY_BOOT_SOUND 1
+#endif
+
 // --- Storage Paths ---
 #define PATH_IDENTITY       "/identity/identity.key"
 #define PATH_IDENTITY_BAK   "/identity/identity.key.bak"
