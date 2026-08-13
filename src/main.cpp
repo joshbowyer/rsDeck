@@ -36,13 +36,15 @@
 #include "ui/screens/LvSettingsScreen.h"
 #include "ui/screens/LvHelpOverlay.h"
 #include "ui/screens/LvQrOverlay.h"
-// Map screen removed
+#include "ui/screens/LvMapScreen.h"
 #include "ui/screens/LvNameInputScreen.h"
 #include "ui/screens/LvTimezoneScreen.h"
 #include "ui/screens/LvDataCleanScreen.h"
 #include "storage/FlashStore.h"
 #include "storage/SDStore.h"
 #include "storage/MessageStore.h"
+#include "maps/TileCache.h"
+#include "maps/TileStore.h"
 #include "reticulum/ReticulumManager.h"
 #include "reticulum/AnnounceManager.h"
 #include "reticulum/LXMFManager.h"
@@ -93,6 +95,7 @@ HotkeyManager hotkeys;
 UIManager ui;
 FlashStore flash;
 SDStore sdStore;
+TileCache tileCache;
 MessageStore messageStore;
 ReticulumManager rns;
 AnnounceManager* announceManager = nullptr;
@@ -126,7 +129,7 @@ LvMessageView lvMessageView;
 LvSettingsScreen lvSettingsScreen;
 LvHelpOverlay lvHelpOverlay;
 LvQrOverlay lvQrOverlay;
-// LvMapScreen removed
+LvMapScreen lvMapScreen;
 LvNameInputScreen lvNameInputScreen;
 LvTimezoneScreen lvTimezoneScreen;
 LvDataCleanScreen lvDataCleanScreen;
@@ -955,9 +958,250 @@ static void handleSerialLineCommand(const char* line) {
 }
 
 static void printSerialHelp() {
-    Serial.println("[SERIAL] commands: ? help | a announce | t raw-test | d diag | r rssi | i irq | p tx-power-cycle | m min-power | q iq | +/- freq");
+    Serial.println("[SERIAL] commands: ? help | a announce | t raw-test | d diag | r rssi | i irq | p tx-power-cycle | m min-power | q iq | x tile-test | X tile-ls | +/- freq");
     Serial.println("[SERIAL] line commands: F<hz> exact-frequency | P<dBm> exact-tx-power | L<len> [dest_hash] LXMF test");
     Serial.println("[SERIAL] lite relay diag: H<len> [dest] Header2 data | J [dest] linkreq | K<ctx_hex> link-data | Y<ctx_hex> link-proof");
+}
+
+// =============================================================================
+// Tile-cache diagnostics (offline slippy map)
+// =============================================================================
+// 'X' = list /maps/<mapset>/… on SD (coverage heuristic assumes x/y/z tree;
+//       TileStore open still dual-probes z/x/y and x/y/z).
+// 'x' = decode test + dual-path layout probe on non-colliding z1 (1,0).
+// =============================================================================
+
+#include <vector>
+#include <algorithm>
+#include <climits>
+
+struct ZoomCoverage {
+    int z = -1;
+    int count = 0;
+    int xMin = INT_MAX, xMax = -1;
+    int yMin = INT_MAX, yMax = -1;
+};
+
+static void listSdMaps() {
+    if (!sdStore.isReady()) {
+        Serial.println("[SD] not ready");
+        return;
+    }
+    File root = sdStore.openDir("/maps");
+    if (!root || !root.isDirectory()) {
+        Serial.println("[SD] /maps not present on card");
+        return;
+    }
+    Serial.println("[SD] mapsets under /maps:");
+    File mapset = root.openNextFile();
+    bool anyMapset = false;
+    while (mapset) {
+        if (mapset.isDirectory()) {
+            String mapsetName = String(mapset.name());
+            String mapsetPath = String("/maps/") + mapsetName;
+            File xdir = sdStore.openDir(mapsetPath.c_str());
+            if (xdir && xdir.isDirectory()) {
+                File x = xdir.openNextFile();
+                int xCount = 0;
+                bool looksLikeMapset = false;
+                while (x) {
+                    if (x.isDirectory()) {
+                        ++xCount;
+                        const char* n = x.name();
+                        if (n && n[0] && isdigit((unsigned char)n[0])) looksLikeMapset = true;
+                    }
+                    x.close();
+                    x = xdir.openNextFile();
+                }
+                xdir.close();
+                if (looksLikeMapset) {
+                    anyMapset = true;
+                    Serial.printf("[SD]   %s/  (%d top-level dirs)\n", mapsetName.c_str(), xCount);
+
+                    std::vector<ZoomCoverage> cov;
+                    auto getOrCreate = [&](int z) -> ZoomCoverage& {
+                        for (auto& c : cov) if (c.z == z) return c;
+                        cov.push_back({z, 0, INT_MAX, INT_MIN, INT_MAX, INT_MIN});
+                        return cov.back();
+                    };
+                    // Enumerate as x/y/z (alternate layout). ZXY cards still list
+                    // something useful as top-level numeric dirs; dual-path open
+                    // is authoritative for loads.
+                    File xdir3 = sdStore.openDir(mapsetPath.c_str());
+                    File xf = xdir3.openNextFile();
+                    while (xf) {
+                        if (!xf.isDirectory()) { xf.close(); xf = xdir3.openNextFile(); continue; }
+                        int xCoord = atoi(xf.name());
+                        String xPath3 = mapsetPath + "/" + xf.name();
+                        xf.close();
+                        File ydir3 = sdStore.openDir(xPath3.c_str());
+                        File yf = ydir3.openNextFile();
+                        while (yf) {
+                            if (!yf.isDirectory()) { yf.close(); yf = ydir3.openNextFile(); continue; }
+                            int yCoord = atoi(yf.name());
+                            String yPath3 = xPath3 + "/" + yf.name();
+                            yf.close();
+                            File zdir3 = sdStore.openDir(yPath3.c_str());
+                            File zf = zdir3.openNextFile();
+                            while (zf) {
+                                if (!zf.isDirectory()) {
+                                    const char* fname = zf.name();
+                                    if (fname) {
+                                        int zCoord = atoi(fname);
+                                        if (zCoord >= 0 && zCoord <= 22) {
+                                            ZoomCoverage& c = getOrCreate(zCoord);
+                                            ++c.count;
+                                            if (xCoord < c.xMin) c.xMin = xCoord;
+                                            if (xCoord > c.xMax) c.xMax = xCoord;
+                                            if (yCoord < c.yMin) c.yMin = yCoord;
+                                            if (yCoord > c.yMax) c.yMax = yCoord;
+                                        }
+                                    }
+                                }
+                                zf.close();
+                                zf = zdir3.openNextFile();
+                            }
+                            zdir3.close();
+                            yf = ydir3.openNextFile();
+                        }
+                        ydir3.close();
+                        xf = xdir3.openNextFile();
+                    }
+                    xdir3.close();
+
+                    std::sort(cov.begin(), cov.end(),
+                              [](const ZoomCoverage& a, const ZoomCoverage& b){ return a.z < b.z; });
+
+                    File xdir2 = sdStore.openDir(mapsetPath.c_str());
+                    File firstX = xdir2.openNextFile();
+                    while (firstX && !firstX.isDirectory()) { firstX.close(); firstX = xdir2.openNextFile(); }
+                    if (firstX) {
+                        String xName = String(firstX.name());
+                        String xPath = mapsetPath + "/" + xName;
+                        firstX.close();
+                        File ydir = sdStore.openDir(xPath.c_str());
+                        File firstY = ydir.openNextFile();
+                        while (firstY && !firstY.isDirectory()) { firstY.close(); firstY = ydir.openNextFile(); }
+                        if (firstY) {
+                            String yName = String(firstY.name());
+                            String yPath = xPath + "/" + yName;
+                            firstY.close();
+                            File zdir = sdStore.openDir(yPath.c_str());
+                            File firstZ = zdir.openNextFile();
+                            while (firstZ && firstZ.isDirectory()) { firstZ.close(); firstZ = zdir.openNextFile(); }
+                            if (firstZ) {
+                                Serial.printf("[SD]     sample path: %s/%s/%s/%s\n",
+                                              mapsetName.c_str(), xName.c_str(), yName.c_str(), firstZ.name());
+                                firstZ.close();
+                            }
+                            zdir.close();
+                        }
+                        ydir.close();
+                    }
+                    xdir2.close();
+
+                    Serial.printf("[SD]     per-zoom coverage (x/y/z walk) for %s:\n", mapsetName.c_str());
+                    for (const auto& c : cov) {
+                        int32_t expected = (c.z >= 0 && c.z < 16) ? ((int32_t)1 << (2 * c.z)) : -1;
+                        const char* status = (expected > 0 && c.count >= expected) ? "FULL"
+                                            : (c.count == 0) ? "EMPTY"
+                                            : "PARTIAL";
+                        Serial.printf("[SD]       z=%2d: count=%-6d x=[%d..%d] y=[%d..%d]  %s\n",
+                                      c.z, c.count, c.xMin, c.xMax, c.yMin, c.yMax, status);
+                    }
+                    Serial.printf("[SD]     TileStore layout sticky: %s\n",
+                                  TileStore::layoutName(TileStore::detectedLayout()));
+                }
+            }
+        }
+        mapset.close();
+        mapset = root.openNextFile();
+    }
+    root.close();
+    if (!anyMapset) Serial.println("[SD]   (no mapset dirs found at root)");
+}
+
+static void runTileCacheTest() {
+    // Non-colliding key: z1 tile (1,0). Paths differ by layout
+    //   z/x/y → /maps/<style>/1/1/0.png
+    //   x/y/z → /maps/<style>/1/0/1.png
+    struct { const char* style; int z; int x; int y; } TILE_GUESS = {
+        "Basemapsxyz-OSM", 1, 1, 0
+    };
+    TileStore::resetLayoutDetection();
+    Serial.printf("[TILE-TEST] layout before probe: %s\n",
+                  TileStore::layoutName(TileStore::detectedLayout()));
+    {
+        const bool zxy = sdStore.exists(
+            TileStore::tilePathLayout(TileStore::Layout::ZXY,
+                                      TILE_GUESS.style, TILE_GUESS.z,
+                                      TILE_GUESS.x, TILE_GUESS.y).c_str());
+        const bool xyz = sdStore.exists(
+            TileStore::tilePathLayout(TileStore::Layout::XYZ,
+                                      TILE_GUESS.style, TILE_GUESS.z,
+                                      TILE_GUESS.x, TILE_GUESS.y).c_str());
+        Serial.printf("[TILE-TEST] probe z=%d x=%d y=%d  zxy=%s  xyz=%s\n",
+                      TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y,
+                      zxy ? "HIT" : "miss", xyz ? "HIT" : "miss");
+    }
+    Serial.printf("[TILE-TEST] diag: queue head=%d tail=%d count=%d maxPumpMs=%lu\n",
+                  tileCache.reqHead(), tileCache.reqTail(), tileCache.reqCount(),
+                  (unsigned long)tileCache.maxPumpMs());
+    Serial.println("[TILE-TEST] === TEST 1: missing tile (z=99) ===");
+    if (!tileCache.requestTile("Basemapsxyz-OSM", 99, 0, 0, TileCache::Priority::PRIO_HIGH)) {
+        Serial.println("[TILE-TEST] missing: enqueue failed (queue full)");
+    }
+    unsigned long t0 = millis();
+    int pumps = 0;
+    while (millis() - t0 < 5000) {
+        tileCache.pump();
+        ++pumps;
+        if (tileCache.getTileIfReady("Basemapsxyz-OSM", 99, 0, 0) != nullptr) break;
+    }
+    unsigned long elapsed = millis() - t0;
+    const lv_img_dsc_t* dscNeg = tileCache.getTileIfReady("Basemapsxyz-OSM", 99, 0, 0);
+    Serial.printf("[TILE-TEST] missing: pumps=%d elapsed=%lu ms ready=%s\n",
+                  pumps, (unsigned long)elapsed, dscNeg ? "YES" : "no (good - never marked READY)");
+
+    Serial.println("[TILE-TEST] === TEST 2: present tile (GUESS) ===");
+    Serial.printf("[TILE-TEST] requesting logical z=%d x=%d y=%d (TileStore resolves path)\n",
+                  TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y);
+    if (!tileCache.requestTile(TILE_GUESS.style, TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y, TileCache::Priority::PRIO_HIGH)) {
+        Serial.println("[TILE-TEST] present: enqueue failed");
+    }
+    t0 = millis();
+    pumps = 0;
+    while (millis() - t0 < 5000) {
+        tileCache.pump();
+        ++pumps;
+        if (tileCache.getTileIfReady(TILE_GUESS.style, TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y) != nullptr) break;
+    }
+    elapsed = millis() - t0;
+    const lv_img_dsc_t* dsc = tileCache.getTileIfReady(TILE_GUESS.style, TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y);
+    Serial.printf("[TILE-TEST] layout after open: %s\n",
+                  TileStore::layoutName(TileStore::detectedLayout()));
+    if (dsc) {
+        Serial.printf("[TILE-TEST] present: pumps=%d elapsed=%lu ms OK\n",
+                      pumps, (unsigned long)elapsed);
+        Serial.printf("[TILE-TEST] tile=%p w=%u h=%u data_size=%u cf=%d\n",
+                      (const void*)dsc, dsc->header.w, dsc->header.h,
+                      dsc->data_size, (int)dsc->header.cf);
+        const uint16_t* px = (const uint16_t*)dsc->data;
+        Serial.printf("[TILE-TEST] first 8 px (RGB565, hex): ");
+        for (int i = 0; i < 8; ++i) {
+            Serial.printf("0x%04x ", (unsigned)(px[i] & 0xFFFF));
+        }
+        Serial.println();
+    } else {
+        Serial.printf("[TILE-TEST] present: pumps=%d elapsed=%lu ms NOT-READY (file probably absent on SD)\n",
+                      pumps, (unsigned long)elapsed);
+        Serial.println("[TILE-TEST] run 'X' to see what tiles are actually on the SD card");
+    }
+    Serial.printf("[TILE-TEST] chunk latency: last=%lu ms max=%lu ms total_pumps=%lu\n",
+                  (unsigned long)tileCache.lastPumpMs(),
+                  (unsigned long)tileCache.maxPumpMs(),
+                  (unsigned long)tileCache.pumpCount());
+    tileCache.dumpStatus();
 }
 
 static void handleSerialCommands() {
@@ -1027,6 +1271,12 @@ static void handleSerialCommands() {
             case 'q':
             case 'Q':
                 toggleDiagnosticInvertIQ();
+                break;
+            case 'x':
+                runTileCacheTest();
+                break;
+            case 'X':
+                listSdMaps();
                 break;
             case '+':
             case '=':
@@ -1182,6 +1432,7 @@ void setup() {
     } else {
         Serial.println("[SD] Not detected");
     }
+    tileCache.begin(&sdStore);
     bootTraceStage("sd-probe");
 
     // Verify radio SPI still works after SD init
@@ -1778,6 +2029,13 @@ void setup() {
     lvSettingsScreen.setShowQrCallback(showQr);
     lvContactsScreen.setShowQrCallback(showQr);
 
+    // Map screen — tile cache + optional GPS follow marker
+    lvMapScreen.setTileCache(&tileCache);
+#if HAS_GPS
+    lvMapScreen.setGPSManager(&gps);
+#endif
+    lvMapScreen.setUIManager(&ui);
+
     // LVGL help overlay
     lvHelpOverlay.create();
     lvQrOverlay.create();
@@ -1787,6 +2045,7 @@ void setup() {
     lvTabScreens[LvTabBar::TAB_CONTACTS] = &lvContactsScreen;
     lvTabScreens[LvTabBar::TAB_MSGS]     = &lvMessagesScreen;
     lvTabScreens[LvTabBar::TAB_NODES]    = &lvNodesScreen;
+    lvTabScreens[LvTabBar::TAB_MAP]      = &lvMapScreen;
     lvTabScreens[LvTabBar::TAB_SETTINGS] = &lvSettingsScreen;
 
     ui.lvTabBar().setTabCallback([](int tab) {
@@ -2071,6 +2330,10 @@ void loop() {
     lxmf.loop();
     if (announceManager) announceManager->loop();
     audio.loop();
+    // Tile cache pump — skip if a LoRa packet is already waiting to drain
+    if (!radio.packetAvailable) {
+        tileCache.pump();
+    }
 
     // 7. WiFi STA connection handler
     if (wifiSTAStarted) {

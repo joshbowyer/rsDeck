@@ -50,7 +50,7 @@ On first boot, Standalone mode generates a Reticulum identity and asks for a
 display name. Your LXMF address is the 32-character hex string you share with
 contacts.
 
-- Tabs: Home, Friends, Msgs, Peers, Setup.
+- Tabs: Home, Friends, Msgs, Peers, Map, Setup.
 - Navigation: trackball movement and click/Enter.
 - Announce: press the trackball or Enter on the Home tab.
 - Add contacts: select a discovered peer, then open or save the chat.
@@ -132,6 +132,56 @@ dist/rsdeck-rnode-m5launcher.bin
 Use the `.zip` files with the Ratspeak web flasher. The `*-m5launcher.bin`
 files are app images for M5Launcher/M5Burner-style launchers that boot
 Standalone or RNode directly from SD.
+
+## Offline Maps
+
+Standalone mode includes an offline slippy-map tab (pan/zoom, optional GPS
+follow marker). Tiles load from the SD card; there is no online tile fetch.
+
+### SD layout
+
+Place PNG tiles under a mapset folder:
+
+```text
+/maps/<mapset>/...
+```
+
+Both common layouts are auto-detected on first open (sticky for the session):
+
+- **z/x/y** (Meshtastic MUI / MUIMapBuilder canonical):
+  `/maps/<mapset>/<z>/<x>/<y>.png`
+- **x/y/z** (alternate cards):
+  `/maps/<mapset>/<x>/<y>/<z>.png`
+
+Tiles are standard Web Mercator XYZ (`y=0` = north). 256×256 PNGs are preferred;
+512×512 sources are accepted and downsampled on device to 256×256.
+
+The Map tab currently defaults to the mapset name `Basemapsxyz-OSM`. Rename your
+folder to match, or change `MAPSET_NAME` in `src/ui/screens/LvMapScreen.h`.
+
+Gray cells mean that zoom/x/y is not on the card (partial regional packs are
+normal). Low zooms (z0–z6 world basemap) plus a regional pack for your area is
+usually enough.
+
+### Controls
+
+- Trackball / touch drag: pan
+- Trackball click or on-screen ±: zoom
+- Keyboard: arrows pan, `+`/`-` zoom, `c` center on GPS (when fix available)
+- On-screen D-pad / zoom buttons when the nav overlay is shown
+
+### Serial diagnostics
+
+With USB serial connected in Standalone mode:
+
+- `X` — list `/maps` mapsets and a coverage heuristic
+- `x` — dual-path layout probe + decode a sample tile
+
+### Out of scope (this PR)
+
+- Peer position markers (needs LXMF position fields end-to-end)
+- In-UI mapset picker
+- Online / WiFi tile download
 
 ## License
 

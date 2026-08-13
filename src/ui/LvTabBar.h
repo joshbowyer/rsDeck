@@ -9,11 +9,12 @@ public:
         TAB_MSGS = 1,
         TAB_CONTACTS = 2,
         TAB_NODES = 3,
-        TAB_SETTINGS = 4,
+        TAB_MAP = 4,
+        TAB_SETTINGS = 5,
         TAB_CHATS = TAB_MSGS,
         TAB_PEERS = TAB_NODES,
         TAB_SETUP = TAB_SETTINGS,
-        TAB_COUNT = 5
+        TAB_COUNT = 6
     };
 
     void create(lv_obj_t* parent);
@@ -44,5 +45,5 @@ private:
     int _unread[TAB_COUNT] = {};
     TabCallback _tabCb = nullptr;
 
-    static constexpr const char* TAB_NAMES[TAB_COUNT] = {"Home", "Chats", "Contacts", "Peers", "Settings"};
+    static constexpr const char* TAB_NAMES[TAB_COUNT] = {"Home", "Chats", "Contacts", "Peers", "Map", "Settings"};
 };
