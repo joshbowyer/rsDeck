@@ -52,12 +52,13 @@ constexpr int kMarkerSize = 14;
 
 // ---- Nav overlay layout ----
 //
-// Six small buttons (4 directional arrows + 2 zoom) clustered in the
+// Six buttons (4 directional arrows + 2 zoom) clustered in the
 // bottom-right corner of the content area. Free area there is bounded
 // by the FOLLOW HUD at the top (y=2..16) and the GPS HUD at the bottom
 // (y=174..188), so we have roughly y=20..172 to work with.
 //
-// Layout (each button 22x16, 2-px gaps):
+// Layout (each button 28x28 square — touch-friendly on the 320x240
+// resistive touch panel; 2-px gaps):
 //
 //         [   UP   ]                  (col 1, row 0)
 //         [ L ][ R ]                  (col 0 / col 2, row 1)
@@ -67,24 +68,26 @@ constexpr int kMarkerSize = 14;
 //
 // Cluster origin (content-area coords) and footprint:
 //   origin = (kNavOriginX, kNavOriginY)
-//   width  = 3 * 22 + 2 * 2 = 70
-//   height = 5 * 16 + 4 * 2 = 88
+//   width  = 3 * 28 + 2 * 2 = 88
+//   height = 5 * 28 + 4 * 2 = 148
 //
-// Right edge at 246 + 70 = 316 leaves a 4 px gap to CONTENT_W=320.
-// Bottom edge at 80 + 88 = 168 leaves a 6 px gap to GPS HUD at y=174.
-constexpr int kNavBtnW     = 22;
-constexpr int kNavBtnH     = 16;
+// Right edge at 228 + 88 = 316 leaves a 4 px gap to CONTENT_W=320.
+// Bottom edge at  22 + 148 = 170 leaves a 4 px gap to GPS HUD at y=174.
+// Top   edge at  22 leaves a 6 px gap below FOLLOW HUD bottom edge y=16.
+// Vertical stride between rows = kNavBtnH + kNavBtnGap = 30.
+constexpr int kNavBtnW     = 28;
+constexpr int kNavBtnH     = 28;
 constexpr int kNavBtnGap   = 2;
-constexpr int kNavOriginX  = 246;
-constexpr int kNavOriginY  = 80;
-constexpr int kNavColCenter = kNavOriginX + kNavBtnW + kNavBtnGap;       // 270
-constexpr int kNavColLeft   = kNavOriginX;                              // 246
-constexpr int kNavColRight  = kNavOriginX + 2 * (kNavBtnW + kNavBtnGap);  // 292
-constexpr int kNavRow0 = kNavOriginY;                                   //  80  (UP)
-constexpr int kNavRow1 = kNavOriginY + 1 * (kNavBtnH + kNavBtnGap);      //  98  (L,R)
-constexpr int kNavRow2 = kNavOriginY + 2 * (kNavBtnH + kNavBtnGap);      // 116  (DN)
-constexpr int kNavRow3 = kNavOriginY + 3 * (kNavBtnH + kNavBtnGap);      // 134  (+)
-constexpr int kNavRow4 = kNavOriginY + 4 * (kNavBtnH + kNavBtnGap);      // 152  (-)
+constexpr int kNavOriginX  = 228;
+constexpr int kNavOriginY  = 22;
+constexpr int kNavColCenter = kNavOriginX + kNavBtnW + kNavBtnGap;       // 258
+constexpr int kNavColLeft   = kNavOriginX;                              // 228
+constexpr int kNavColRight  = kNavOriginX + 2 * (kNavBtnW + kNavBtnGap);  // 288
+constexpr int kNavRow0 = kNavOriginY;                                   //  22  (UP)
+constexpr int kNavRow1 = kNavOriginY + 1 * (kNavBtnH + kNavBtnGap);      //  52  (L,R)
+constexpr int kNavRow2 = kNavOriginY + 2 * (kNavBtnH + kNavBtnGap);      //  82  (DN)
+constexpr int kNavRow3 = kNavOriginY + 3 * (kNavBtnH + kNavBtnGap);      // 112  (+)
+constexpr int kNavRow4 = kNavOriginY + 4 * (kNavBtnH + kNavBtnGap);      // 142  (-)
 
 // ---- Debug logging gate ----
 //
@@ -235,21 +238,31 @@ void LvMapScreen::createUI(lv_obj_t* parent) {
         _navBtnY2[idx] = y + kNavBtnH - 1 + Theme::STATUS_BAR_H;
         return btn;
     };
+    // Sign convention for all four directional buttons: pressing LEFT means
+    // the viewport's CENTER moves LEFT (the world content slides LEFT under
+    // a stationary touch, like dragging the map with the trackball). panBy
+    // adds its dx/dy directly to _centerWorldPx (see panBy() below — Y grows
+    // downward in slippy-map coords, so "up on screen" is a negative dy).
+    // The same convention applies to the trackball in refreshUI() (camera
+    // follows the ball), and to the keyboard arrow keys in handleKey(). The
+    // touch-drag path in refreshUI() uses the OPPOSITE convention (camera
+    // moves opposite the finger, like pushing a paper map) — that's the
+    // standard mobile-map feel and is left as-is.
     makeNavBtn(NAV_BTN_LEFT,  kNavColLeft,   kNavRow1, LV_SYMBOL_LEFT,  [](lv_event_t* e){
-        auto* self = (LvMapScreen*)lv_event_get_user_data(e);
-        self->panBy( 32, 0); self->rebuildTiles();
-    });
-    makeNavBtn(NAV_BTN_UP,    kNavColCenter, kNavRow0, LV_SYMBOL_UP,    [](lv_event_t* e){
-        auto* self = (LvMapScreen*)lv_event_get_user_data(e);
-        self->panBy(0,  32); self->rebuildTiles();
-    });
-    makeNavBtn(NAV_BTN_RIGHT, kNavColRight,  kNavRow1, LV_SYMBOL_RIGHT, [](lv_event_t* e){
         auto* self = (LvMapScreen*)lv_event_get_user_data(e);
         self->panBy(-32, 0); self->rebuildTiles();
     });
-    makeNavBtn(NAV_BTN_DOWN,  kNavColCenter, kNavRow2, LV_SYMBOL_DOWN,  [](lv_event_t* e){
+    makeNavBtn(NAV_BTN_UP,    kNavColCenter, kNavRow0, LV_SYMBOL_UP,    [](lv_event_t* e){
         auto* self = (LvMapScreen*)lv_event_get_user_data(e);
         self->panBy(0, -32); self->rebuildTiles();
+    });
+    makeNavBtn(NAV_BTN_RIGHT, kNavColRight,  kNavRow1, LV_SYMBOL_RIGHT, [](lv_event_t* e){
+        auto* self = (LvMapScreen*)lv_event_get_user_data(e);
+        self->panBy( 32, 0); self->rebuildTiles();
+    });
+    makeNavBtn(NAV_BTN_DOWN,  kNavColCenter, kNavRow2, LV_SYMBOL_DOWN,  [](lv_event_t* e){
+        auto* self = (LvMapScreen*)lv_event_get_user_data(e);
+        self->panBy(0,  32); self->rebuildTiles();
     });
     makeNavBtn(NAV_BTN_ZIN,   kNavColCenter, kNavRow3, LV_SYMBOL_PLUS,  [](lv_event_t* e){
         auto* self = (LvMapScreen*)lv_event_get_user_data(e);
@@ -549,11 +562,15 @@ bool LvMapScreen::handleKey(const KeyEvent& event) {
         return true;
     }
 
-    // Arrow keys — pan in 32px increments (alternative to trackball drag)
-    if (event.up)    { panBy(0,  32); rebuildTiles(); return true; }
-    if (event.down)  { panBy(0, -32); rebuildTiles(); return true; }
-    if (event.left)  { panBy( 32, 0); rebuildTiles(); return true; }
-    if (event.right) { panBy(-32, 0); rebuildTiles(); return true; }
+    // Arrow keys — pan in 32 px increments. Sign convention matches the
+    // nav-overlay buttons above (see comment at the button handlers):
+    // pressing LEFT makes the viewport center move LEFT (camera follows
+    // key direction). The touch-drag handler in refreshUI() uses the
+    // opposite convention and is intentionally different.
+    if (event.up)    { panBy(0, -32); rebuildTiles(); return true; }
+    if (event.down)  { panBy(0,  32); rebuildTiles(); return true; }
+    if (event.left)  { panBy(-32, 0); rebuildTiles(); return true; }
+    if (event.right) { panBy( 32, 0); rebuildTiles(); return true; }
 
     // Enter — zoom in (mirrors trackball click behavior)
     if (event.enter || event.character == '\n' || event.character == '\r') {
@@ -690,12 +707,27 @@ void LvMapScreen::rebuildTiles() {
             // a confusing gray placeholder where the world doesn't even
             // extend to. requestVisibleTiles() also skips these, so the
             // negative cache stays clean.
+            //
+            // Defense-in-depth: in addition to setting the HIDDEN flag,
+            // explicitly reposition both bg and img far off-screen (-9999,
+            // -9999). If the HIDDEN flag were ever not honored (LVGL quirk,
+            // race, etc.), the widget cannot accidentally cover a different
+            // slot's on-screen position from a previous render — without
+            // this reposition, an OOW slot would stay at its last in-world
+            // (sx, sy), and a stale position could visually collide with
+            // another slot's tile.
             if (!isInWorld(tx, ty)) {
-                if (s.bg && !lv_obj_has_flag(s.bg, LV_OBJ_FLAG_HIDDEN)) {
-                    lv_obj_add_flag(s.bg, LV_OBJ_FLAG_HIDDEN);
+                if (s.bg) {
+                    if (!lv_obj_has_flag(s.bg, LV_OBJ_FLAG_HIDDEN)) {
+                        lv_obj_add_flag(s.bg, LV_OBJ_FLAG_HIDDEN);
+                    }
+                    lv_obj_set_pos(s.bg, -9999, -9999);
                 }
-                if (s.img && !lv_obj_has_flag(s.img, LV_OBJ_FLAG_HIDDEN)) {
-                    lv_obj_add_flag(s.img, LV_OBJ_FLAG_HIDDEN);
+                if (s.img) {
+                    if (!lv_obj_has_flag(s.img, LV_OBJ_FLAG_HIDDEN)) {
+                        lv_obj_add_flag(s.img, LV_OBJ_FLAG_HIDDEN);
+                    }
+                    lv_obj_set_pos(s.img, -9999, -9999);
                 }
                 s.curDsc = nullptr;
                 // Keep tz == _zoom so requestVisibleTiles()'s "slot is being
@@ -704,7 +736,7 @@ void LvMapScreen::rebuildTiles() {
                 s.tx = tx;
                 s.ty = ty;
                 s.tz = _zoom;
-                MAP_LOG("[MAP] slot %d z=%d x=%d y=%d -> OUT-OF-WORLD (hidden)\n",
+                MAP_LOG("[MAP] slot %d z=%d x=%d y=%d -> OUT-OF-WORLD (hidden, parked off-screen)\n",
                         idx, _zoom, tx, ty);
                 continue;
             }
@@ -714,14 +746,22 @@ void LvMapScreen::rebuildTiles() {
 
             // Make sure bg/img are un-hidden when transitioning back
             // into the world (e.g. zoom-in from a low zoom where this
-            // slot was hidden).
+            // slot was hidden). The BG un-hides unconditionally; the
+            // IMG stays hidden until the dsc block (below) attaches a
+            // ready tile — that block clears HIDDEN when a new dsc is
+            // set, and re-hides the IMG when no dsc is ready yet. We
+            // intentionally do NOT un-hide the IMG here, because an
+            // empty src (curDsc == nullptr) would show garbage from a
+            // previous src.
             if (s.bg && lv_obj_has_flag(s.bg, LV_OBJ_FLAG_HIDDEN)) {
                 lv_obj_clear_flag(s.bg, LV_OBJ_FLAG_HIDDEN);
             }
             if (s.img && lv_obj_has_flag(s.img, LV_OBJ_FLAG_HIDDEN) &&
                 s.curDsc == nullptr) {
-                // Leave hidden if curDsc is non-null — the next block
-                // will clear the flag when it re-attaches the dsc.
+                // curDsc is null → no dsc to show → IMG intentionally
+                // stays hidden so we don't render a stale src. The dsc
+                // block (below) will clear the flag when it attaches a
+                // real dsc.
             }
 
             // Move bg + img to the new screen position. Tiles outside
