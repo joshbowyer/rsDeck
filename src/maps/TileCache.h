@@ -43,9 +43,61 @@ class TileCache {
 public:
     // Tunable: bytes of compressed PNG data fed per pump() call. Lower =
     // shorter per-call latency / more responsive to LoRa. Too low = thousands
-    // of pump() calls per tile. 4 KB is a reasonable starting point; tune
-    // after measuring on real hardware.
-    static constexpr size_t TILE_CHUNK_BYTES = 4096;
+    // of pump() calls per tile.
+    //
+    // IMPORTANT: the dominant per-pump cost on ESP32-S3 is NOT the SD read
+    // (~2-3 ms for this size at 16 MHz SPI), it is pngle_feed() —
+    // specifically pngle_draw_pixels() running at ~5 us/pixel for ~10 K
+    // pixels when pngle's 32 KB lz_buf fills in one call (measured ~55 ms
+    // on real hw, including a no-op user callback — the cost is almost
+    // entirely in pngle's own per-pixel pipeline: read_pixel_value +
+    // adjust_color + draw_callback invocation, not the user callback body
+    // itself). The burst is intrinsic to pngle — to spread it across
+    // multiple per-call flushes would require modifying lib/pngle/pngle.c
+    // to force-flush the lz_buf on smaller batches, but my attempts to
+    // patch tinfl_decompress output (capping out_bytes, or force-flushing
+    // mid-call) corrupted the inflate state and triggered
+    // "Failed to decompress the IDAT stream" errors. So the chunk size
+    // here is 1024 (down from 4096) to minimize the number of bytes fed
+    // per pump, and the wall-clock time-budget loop inside pump() is the
+    // SAFETY NET that prevents any future slow path from wedging the
+    // main loop. The realistic worst-case single-pump cost remains ~65-70
+    // ms (one iter where pngle's 32 KB lz_buf fill + per-pixel burst
+    // fires), but the time-budget check would catch any pump that exceeds
+    // ~18 ms wall-clock across multiple iters.
+    static constexpr size_t TILE_CHUNK_BYTES = 1024;
+    // KNOWN LIMITATION (measured on real hardware, oracle-reviewed, deemed
+    // safe to ship): pngle's internal ~32KB deflate LZ77 dictionary
+    // (lib/pngle/pngle.c:124 lz_buf[TINFL_LZ_DICT_SIZE]) is NOT a batching
+    // buffer we can shrink or externally flush early - it IS the sliding
+    // window tinfl_decompress needs for back-references, and both an
+    // lz_buf-shrink and an early-flush patch were tried and broke decode
+    // (tinfl_status < TINFL_STATUS_DONE). Net effect: pngle_draw_pixels
+    // fires in ~60-180ms bursts (measured: ~60-70ms for RGB8, up to ~180ms
+    // projected for 8-bit palette tiles at ~10-32K pixels/burst) regardless
+    // of our TILE_CHUNK_BYTES feed size, 1-3x per tile. This is safe at the
+    // default radio preset (SF11/250kHz, 550ms+ min packet airtime, burst is
+    // 8x under that floor) but could theoretically collide with a
+    // user-configured fast/short-packet preset (SF7-class, ~30-80ms
+    // airtime) if a burst straddles two back-to-back RX completions - see
+    // the radio.packetAvailable guard in main.cpp's tileCache.pump() call
+    // site, which mitigates by refusing to START a new pump while a packet
+    // is already waiting to be drained (does not bound an in-progress
+    // burst, only avoids starting one during known-risky moments).
+    //
+    // FOLLOW-UP FIX (spec'd by oracle review, not yet implemented): pngle.c's
+    // decode loop already calls tinfl_decompress() incrementally and gets
+    // out_bytes back after every call - it just defers drawing until the
+    // 32KB ring buffer fills or the image completes. The correct patch
+    // draws newly-produced bytes immediately after EVERY tinfl_decompress
+    // return (tracking a separate `drawn` offset) instead of waiting for
+    // the ring to fill, while leaving next_out/avail_out ring bookkeeping
+    // untouched (still only reset at avail_out==0). This shrinks burst size
+    // proportional to feed chunk size without touching tinfl's invariants,
+    // unlike the two failed attempts which incorrectly reset next_out
+    // early. ~10-15 line change in lib/pngle/pngle.c's drain logic (see the
+    // XXX comments near TINFL_LZ_DICT_SIZE usage). Do this before/if the
+    // map screen ships with support for fast/short-packet radio presets.
 
     static constexpr int     TILE_PX         = 256;          // standard XYZ tile
     static constexpr int     SLOT_COUNT      = 12;           // ~1.5 MB PSRAM pool
@@ -102,6 +154,12 @@ public:
     uint32_t lastPumpMs() const { return _lastPumpMs; }
     uint32_t maxPumpMs() const  { return _maxPumpMs; }
     uint32_t pumpCount() const { return _pumpCount; }
+
+    // Diagnostic: queue state for serial-test debug (private accessors
+    // because the queue head/tail/count are private impl details).
+    int reqCount() const { return _reqCount; }
+    int reqHead()  const { return _reqHead; }
+    int reqTail()  const { return _reqTail; }
 
 private:
     // ---- Pool bookkeeping ----

@@ -12,6 +12,25 @@ namespace {
 
 constexpr uint32_t ABSOLUTE_MAX_PUMP_MS = 200;  // warn if a single pump() misses budget badly
 
+// Per-pump wall-clock budget (microseconds). Loop() runs at ~60 Hz; to leave
+// headroom for LoRa RX FIFO drain + LVGL + telemetry, we want pump() back
+// inside ~20-25 ms. PUMP_BUDGET_US=18000 keeps us ~7 ms under one full loop
+// tick on the typical 16 ms LVGL tick, and 7 ms under the worst-case 25 ms
+// budget for LoRa. The time-budget check inside pump() is a SAFETY NET —
+// measured single-pump cost at TILE_CHUNK_BYTES=1024 varies from ~5 ms (most
+// iters, just SD-read + tiny inflate) to ~70 ms (one iter where pngle's
+// 32 KB lz_buf fills and the per-pixel callback fires for ~10 K pixels).
+// The budget check fires only on multi-iter pumps that exceed 18 ms wall-clock.
+constexpr uint32_t PUMP_BUDGET_US = 18000;
+
+// ---- DEBUG: sub-step timing for chunk-latency investigation ----
+// Set to 1 to print one diagnostic line per pump() call that actually does
+// decode work (SD-read + pngle_feed). Used to identify whether the 67-71 ms
+// per-pump latency on real hardware is dominated by SD read time or pngle
+// (deflate-inflate + per-pixel callback) time. Set to 0 to silence for
+// production.
+constexpr int TILE_DEBUG_SUBSTEP_TIMING = 1;
+
 }  // namespace
 
 // =============================================================================
@@ -337,39 +356,91 @@ void TileCache::pump() {
 
     // 1. Continue an in-progress decode if any.
     if (Slot* s = pickLoadingSlot()) {
-        // Shared IO buffer in BSS (not on the stack — 8 KB would overflow
-        // the default 8 KB Arduino loop task stack). Only one slot is
-        // LOADING at a time, so a single buffer is safe. Leftover bytes
-        // from pngle_feed are tracked per-slot via s->ioBufLen.
+        // Shared IO buffer in BSS (not on the stack — 2 KB would still fit but
+        // we keep the 2x multiplier so a partial deflate-block carry-over
+        // always has room). Only one slot is LOADING at a time, so a single
+        // buffer is safe. Leftover bytes from pngle_feed are tracked per-slot
+        // via s->ioBufLen.
         static uint8_t buf[TILE_CHUNK_BYTES * 2];
-        size_t room = sizeof(buf);
-        if (room > s->ioBufLen + TILE_CHUNK_BYTES) {
-            room = s->ioBufLen + TILE_CHUNK_BYTES;
-        }
-        size_t remaining = (s->bytesFed < s->fileSize) ? (s->fileSize - s->bytesFed) : 0;
-        size_t want = (room < remaining) ? room : remaining;
-        size_t got = 0;
-        if (want > 0) {
-            got = s->file.read(buf + s->ioBufLen, want);
-            s->bytesFed += got;
-        }
-        size_t totalLen = s->ioBufLen + got;
-        if (totalLen > 0) {
-            int fed = pngle_feed(s->pngle, buf, totalLen);
-            if (fed < 0) {
-                // Decode error — release the slot, mark MISSING.
-                Serial.printf("[TILE] decode err z=%ld x=%ld y=%ld: %s\n",
-                              (long)s->key.z, (long)s->key.x, (long)s->key.y,
-                              pngle_error(s->pngle));
-                addNegCache(s->key);
-                freeSlot(*s);
-            } else {
+
+        // Wall-clock budget for this pump. We measure elapsed micros() and
+        // break out of the inner loop as soon as we exceed it. This is a
+        // SAFETY NET — with TILE_CHUNK_BYTES=1024 a single read+feed iteration
+        // naturally finishes in ~17 ms, so we only bail early on outlier
+        // chunks (very dense IDAT, slow SPI bus contention, etc).
+        unsigned long budgetStart = micros();
+        // ---- DEBUG: sub-step timing accumulators ----
+        unsigned long totalSdUs = 0;
+        unsigned long totalFeedUs = 0;
+        unsigned long totalReadBytes = 0;
+        unsigned long totalFeedBytes = 0;
+        int          iterations = 0;
+        // ----------------------------------------------
+
+        // Inner loop: do (read up to TILE_CHUNK_BYTES) + (pngle_feed over
+        // accumulated buf), check wall-clock, repeat until budget exhausted
+        // or file finished. The single read per iteration caps each pngle_feed
+        // call to roughly TILE_CHUNK_BYTES+TILE_CHUNK_BYTES bytes of input
+        // (carry-over + new) which bounds the inflate cost per iteration.
+        while (s->state == SlotState::LOADING &&
+               s->bytesFed < s->fileSize &&
+               (micros() - budgetStart) < PUMP_BUDGET_US) {
+
+            size_t room = sizeof(buf) - s->ioBufLen;
+            if (room > TILE_CHUNK_BYTES) room = TILE_CHUNK_BYTES;
+            size_t remaining = s->fileSize - s->bytesFed;
+            size_t want = (room < remaining) ? room : remaining;
+
+            size_t got = 0;
+            // ---- DEBUG: sub-step timing ----
+            unsigned long tSdStart = 0, tSdEnd = 0, tFeedStart = 0, tFeedEnd = 0;
+            // -------------------------------
+            if (want > 0) {
+                tSdStart = micros();
+                got = s->file.read(buf + s->ioBufLen, want);
+                tSdEnd = micros();
+                s->bytesFed += got;
+            }
+            size_t totalLen = s->ioBufLen + got;
+            int fed = 0;
+            if (totalLen > 0) {
+                tFeedStart = micros();
+                fed = pngle_feed(s->pngle, buf, totalLen);
+                tFeedEnd = micros();
+                if (fed < 0) {
+                    // Decode error — release the slot, mark MISSING.
+                    Serial.printf("[TILE] decode err z=%ld x=%ld y=%ld: %s\n",
+                                  (long)s->key.z, (long)s->key.x, (long)s->key.y,
+                                  pngle_error(s->pngle));
+                    addNegCache(s->key);
+                    freeSlot(*s);
+                    break;
+                }
                 size_t leftover = (size_t)totalLen - (size_t)fed;
                 if (leftover > 0) {
                     memmove(buf, buf + fed, leftover);
                 }
                 s->ioBufLen = leftover;
             }
+            // ---- DEBUG: per-iteration timing accumulation ----
+            totalSdUs    += (tSdEnd - tSdStart);
+            totalFeedUs  += (tFeedEnd - tFeedStart);
+            totalReadBytes += got;
+            totalFeedBytes += (unsigned long)fed;
+            ++iterations;
+            if (TILE_DEBUG_SUBSTEP_TIMING) {
+                Serial.printf("[TILE-ITER] i=%d sd=%luus feed=%luus got=%u fed=%d elapsed=%luus\n",
+                              iterations,
+                              (unsigned long)(tSdEnd - tSdStart),
+                              (unsigned long)(tFeedEnd - tFeedStart),
+                              (unsigned)got,
+                              fed,
+                              (unsigned long)(micros() - budgetStart));
+            }
+            // --------------------------------------------------
+            // If pngle finished (done callback marked slot READY), bail out
+            // of the inner loop immediately — no point burning budget.
+            if (s->state != SlotState::LOADING) break;
         }
         // EOF check: file exhausted, no leftover, pngle still hasn't marked
         // DONE. Either the PNG is corrupt/truncated, or done callback is in
@@ -384,6 +455,18 @@ void TileCache::pump() {
             s->lastTouchMs = millis();
         }
         ++s->chunkCount;
+        // ---- DEBUG: sub-step timing print (gated) ----
+        if (TILE_DEBUG_SUBSTEP_TIMING && iterations > 0) {
+            // Single line per pump: SD-read us / pngle-feed us / bytes-read / bytes-fed / iterations
+            Serial.printf("[TILE-SUB] sd=%luus feed=%luus read=%lu fed=%lu iters=%d budget_left=%luus fed_total=%u/%u\n",
+                          totalSdUs, totalFeedUs,
+                          totalReadBytes, totalFeedBytes,
+                          iterations,
+                          (unsigned long)(PUMP_BUDGET_US - (micros() - budgetStart)),
+                          (unsigned)s->bytesFed,
+                          (unsigned)s->fileSize);
+        }
+        // ---------------------------------------------
     }
     // 2. Otherwise, start the next request.
     else if (_reqCount > 0) {

@@ -1086,13 +1086,17 @@ static void listSdMaps() {
 static void runTileCacheTest() {
     // Pick a guess for the present tile. If the user has already run 'X' and
     // knows a real coord, they can edit TILE_GUESS below. The default targets
-    // the Basemapsxyz-OSM mapset at z=5/x=16/y=11 (a small low-zoom tile that
+    // the Basemapsxyz-OSM mapset at z=5/x=16/y/11 (a small low-zoom tile that
     // is fast to decode). Note: on-disk path is /<mapset>/<x>/<y>/<z>.png
     // (SD root, x/y/z order) — see TileStore.h; this struct's field order
     // (style,z,x,y) is just the API parameter order, unrelated to path order.
     struct { const char* style; int z; int x; int y; } TILE_GUESS = {
         "Basemapsxyz-OSM", 1, 1, 1
     };
+    // ---- DEBUG: print queue state for diagnosing "enqueue failed" ----
+    Serial.printf("[TILE-TEST] diag: queue head=%d tail=%d count=%d maxPumpMs=%lu\n",
+                  tileCache.reqHead(), tileCache.reqTail(), tileCache.reqCount(),
+                  (unsigned long)tileCache.maxPumpMs());
     Serial.println("[TILE-TEST] === TEST 1: missing tile (z=99) ===");
     if (!tileCache.requestTile("Basemapsxyz-OSM", 99, 0, 0, TileCache::Priority::PRIO_HIGH)) {
         Serial.println("[TILE-TEST] missing: enqueue failed (queue full)");
@@ -2326,11 +2330,17 @@ void loop() {
     if (announceManager) announceManager->loop();
     audio.loop();
     telemetryManager.loop();
-    // 6.5 Tile cache pump — one chunk per main-loop iteration. The pump()'s
-    //     own internal ~20-25ms budget is enforced well below the LoRa packet
-    //     airtime, so a stalled packet is overwritten by the next one only
-    //     if the radio is configured for sub-30ms airtimes (rare).
-    tileCache.pump();
+    // 6.5 Tile cache pump — one chunk per main-loop iteration. pngle's decode
+    //     bursts are safe at any default radio preset (measured ~60-180ms max
+    //     vs 550ms+ minimum packet airtime at SF11/250kHz) but could theoretically
+    //     collide with a very fast/short-packet custom preset (SF7-class,
+    //     ~30-80ms airtime) if a burst straddles two back-to-back RX completions.
+    //     Cheap guard: skip this iteration's pump if a packet is already
+    //     waiting to be drained (LoRaInterface::loop() reads it just above),
+    //     so we never start new tile work while RX readout is pending.
+    if (!radio.packetAvailable) {
+        tileCache.pump();
+    }
 
     // 7. WiFi STA connection handler
     if (wifiSTAStarted) {
