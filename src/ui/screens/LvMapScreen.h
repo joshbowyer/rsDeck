@@ -100,17 +100,17 @@ private:
     static constexpr int ZOOM_MAX = 15;
 
     // Default startup view. z=1 (continental-blocks scale) is the lowest
-    // confirmed-present zoom on the user's SD card; tile (1,1) at z=1 is
-    // a verified real file (see listSdMaps() in main.cpp / 'X' serial
-    // command). Centering on the world-pixel center of that tile
-    // (256+128, 256+128) = (384, 384) is a safe "demo view" that always
-    // shows at least one real tile on first boot, so the user can verify
-    // the rendering pipeline works before assuming a data-coverage issue.
+    // multi-tile zoom on the user's SD card. Centering on the world-pixel
+    // center of the whole z=1 world (256, 256) — the corner shared by all
+    // four continental tiles (0,0)/(1,0)/(0,1)/(1,1) — puts real land on
+    // screen from the first frame. The old (384, 384) default was the
+    // center of tile (1,1) alone, i.e. the Indian Ocean / SE corner of
+    // Africa, which looked like an empty/ocean render.
     // If a GPS fix is available at first entry, onEnter() overrides this
     // by arming follow-GPS and centering on the fix (see _everCenteredOnGps).
     static constexpr int DEFAULT_ZOOM = 1;
-    static constexpr int64_t DEFAULT_CENTER_WORLD_X = 384;  // z=1 tile (1,1) center
-    static constexpr int64_t DEFAULT_CENTER_WORLD_Y = 384;  // z=1 tile (1,1) center
+    static constexpr int64_t DEFAULT_CENTER_WORLD_X = 256;  // z=1 world center
+    static constexpr int64_t DEFAULT_CENTER_WORLD_Y = 256;  // z=1 world center
 
     // Hardcoded mapset for v1. Other mapsets on the user's card are
     // detectable via 'X' serial command; cycling between them is a TODO.
@@ -122,6 +122,12 @@ private:
         lv_obj_t* bg = nullptr;            // gray placeholder, behind img
         lv_obj_t* img = nullptr;           // tile bitmap (lv_img)
         const lv_img_dsc_t* curDsc = nullptr;
+        // TileCache slot generation that curDsc was bound from. The dsc
+        // pointer is permanent per cache slot and its buffer gets reused for
+        // a different tile, so the pointer alone can't tell us the pixels
+        // changed identity — compare (curDsc, curGen) before deciding an
+        // attached image is still valid.
+        uint32_t curGen = 0;
         int32_t tx = INT32_MIN;            // last-rendered tile x
         int32_t ty = INT32_MIN;            // last-rendered tile y
         int32_t tz = -1;                   // last-rendered zoom
@@ -138,6 +144,9 @@ private:
     void zoomIn();
     void zoomOut();
     void clampZoom();
+    // Keep _centerWorldX/Y inside the world so the viewport can never sit
+    // (partly) outside [0, worldPx). Called after every pan/zoom/recenter.
+    void clampCenterToWorld();
 
     // Map viewport origin (top-left of content area) in world px.
     // _centerWorldPx is the center; origin = center - (VIEW_HALF_W, VIEW_HALF_H).

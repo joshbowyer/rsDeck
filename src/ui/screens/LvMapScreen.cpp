@@ -327,10 +327,14 @@ void LvMapScreen::destroyUI() {
         _slots[i].bg = nullptr;
         _slots[i].img = nullptr;
         _slots[i].curDsc = nullptr;
+        _slots[i].curGen = 0;
         _slots[i].tx = INT32_MIN;
         _slots[i].ty = INT32_MIN;
         _slots[i].tz = -1;
     }
+    // No lv_img references our cache buffers any more — release the pins so
+    // the pool is fully evictable while the map screen is closed.
+    if (_tileCache) _tileCache->clearAllPins();
     LvScreen::destroyUI();
 }
 
@@ -500,9 +504,14 @@ void LvMapScreen::refreshUI() {
         if (didRecenter) rebuildTiles();
     }
 
-    // 4. Tile request re-arm — for still-missing tiles, every 250ms.
+    // 4. Tile re-arm — every 250ms. rebuildTiles() FIRST so tiles whose
+    //    decode finished since the last pass actually get attached to
+    //    their slot (requestVisibleTiles() only enqueues — without the
+    //    rebuild the view stays on gray placeholders until the next
+    //    pan/zoom/GPS recenter), then request whatever is still missing.
     if (now - _lastTileRequestMs >= TILE_REQUEST_INTERVAL_MS) {
         _lastTileRequestMs = now;
+        rebuildTiles();
         requestVisibleTiles();
     }
 
@@ -632,25 +641,30 @@ void LvMapScreen::rebuildTiles() {
     viewportOriginWorldPx(ox, oy);
     SlippyMath::TileXY tl = SlippyMath::worldPxToTile({ox, oy});
 
-    // Visible tile range with buffer tiles on the left/bottom edges.
+    // Visible tile range with buffer tiles on the right/bottom edges.
     //
     // GRID_COLS=3, GRID_ROWS=2 (6 slots). With 256-px tiles and a
     // 320x194 content area, the visible width is 1.25 tiles and the
-    // visible height is 0.76 tiles. The grid therefore always covers
-    // 2-3 tile columns and 1-2 tile rows of the world.
+    // visible height is 0.76 tiles. Grid covers columns tl.x .. tl.x+2,
+    // which is the worst-case visible span for VIEW_W=320: at fractional
+    // alignment up to 319 px can spill past the tile boundary at tl.x+1,
+    // so the third column is the right-edge buffer. Anchoring on tl (drop
+    // the -1) keeps the grid on the visible region plus a one-tile buffer
+    // past the right/bottom edges — symmetric with the tyMin = tl.y
+    // bottom-buffer behavior below.
     //
-    // Placement: anchor the grid on the TOP-LEFT visible tile (tl) and
-    // extend DOWN and RIGHT. The buffer tile is on the LEFT (txMin = tl.x
-    // - 1) and BELOW (tyMin = tl.y, no buffer above — the second row
-    // IS the buffer-below). The previous formula (tyMin = tl.y - 1) put
-    // the buffer above, which left the bottom half of the viewport
-    // uncovered at low zooms (e.g. z=5 center=(0,0) → visible tile rows
-    // are y=-1 AND y=0, but the old grid only showed y=-2 and y=-1, so
-    // the bottom 50% of the screen was empty placeholder-less gray).
+    // The previous formula (txMin = tl.x - 1) put the buffer column on the
+    // LEFT instead of the right. With 256-px tiles and VIEW_W=320 the right
+    // edge can show up to 64 px of the next column while the left edge was
+    // off-screen by however many pixels the viewport origin was offset into
+    // tl.x — same kind of "one edge is uncovered" bug that the old tyMin =
+    // tl.y - 1 produced at the bottom (z=5 center=(0,0) → visible rows
+    // y=-1 AND y=0, but the old grid only showed y=-2 and y=-1, leaving the
+    // bottom 50% gray). Anchoring on tl covers the full visible span.
     //
-    // For high zooms (e.g. z=15) the visible is 1-2 cols x 1 row; the
-    // grid just has 1-2 buffers around that, same as before.
-    int32_t txMin = tl.x - 1;
+    // For high zooms (e.g. z=15) the visible is 1-2 cols x 1 row; the grid
+    // just has 1-2 buffers around that, same as before.
+    int32_t txMin = tl.x;
     int32_t tyMin = tl.y;
 
     // At low zoom the world is smaller than the viewport AND smaller
@@ -681,6 +695,13 @@ void LvMapScreen::rebuildTiles() {
     // current view has no READY tiles for >2.5s after the request was
     // queued (likely data coverage issue, not a rendering bug).
     _anySlotReadySinceRebuild = false;
+
+    // Drop last pass's pins; every in-world slot below re-pins its key so
+    // TileCache can't LRU-evict (memset + re-decode) a PSRAM buffer that an
+    // on-screen lv_img is still blitting. Pins on tiles that just scrolled
+    // out of view are released here, which is what keeps the pool churning
+    // normally while panning.
+    if (_tileCache) _tileCache->clearAllPins();
 
 #if LV_MAP_DEBUG
     int32_t visColMax = tl.x;
@@ -730,6 +751,7 @@ void LvMapScreen::rebuildTiles() {
                     lv_obj_set_pos(s.img, -9999, -9999);
                 }
                 s.curDsc = nullptr;
+                s.curGen = 0;
                 // Keep tz == _zoom so requestVisibleTiles()'s "slot is being
                 // repopulated this tick" check still works; the out-of-world
                 // skip happens in requestVisibleTiles() via isInWorld().
@@ -777,22 +799,46 @@ void LvMapScreen::rebuildTiles() {
             // Try to attach a ready tile. If not ready yet, the placeholder
             // stays visible. requestVisibleTiles() will queue a load.
             const lv_img_dsc_t* dsc = nullptr;
+            uint32_t gen = 0;
             if (_tileCache) {
-                dsc = _tileCache->getTileIfReady(MAPSET_NAME, _zoom, tx, ty);
+                dsc = _tileCache->getTileIfReady(MAPSET_NAME, _zoom, tx, ty, &gen);
+                // Pin the key whether it's READY or still LOADING — this slot
+                // is on screen, so its cache buffer must not be recycled out
+                // from under LVGL, and pinning the in-flight decode also stops
+                // request thrashing while panning.
+                _tileCache->pinTile(MAPSET_NAME, _zoom, tx, ty);
             }
 #if LV_MAP_DEBUG
             bool isInVisibleRange =
                 (tx >= tl.x && tx <= visColMax && ty >= tl.y && ty <= visRowMax);
 #endif
             if (dsc) {
-                if (s.img && s.curDsc != dsc) {
+                // Re-bind on ANY identity change, not just a pointer change.
+                // TileCache hands out a permanent lv_img_dsc_t per cache slot,
+                // so a recycled slot returns the SAME pointer with different
+                // pixels (and possibly a different header w/h). The old
+                // pointer-only check skipped set_src in that case, leaving
+                // LVGL drawing stale geography with a stale header — the
+                // "vertically squished z0 North America inside a z1 cell".
+                if (s.img && (s.curDsc != dsc || s.curGen != gen)) {
+                    // Drop any cached decoder entry keyed on this pointer so
+                    // LVGL re-reads the header instead of reusing the old
+                    // one. No-op when LV_IMG_CACHE_DEF_SIZE == 0 (current
+                    // config), but correct if the cache is ever enabled.
+                    lv_img_cache_invalidate_src(dsc);
                     lv_img_set_src(s.img, dsc);
                     s.curDsc = dsc;
+                    s.curGen = gen;
+                    lv_obj_clear_flag(s.img, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_invalidate(s.img);
+                } else if (s.img && lv_obj_has_flag(s.img, LV_OBJ_FLAG_HIDDEN)) {
+                    // Same tile, same generation — already bound, just make
+                    // sure it's visible (e.g. it was hidden while loading).
                     lv_obj_clear_flag(s.img, LV_OBJ_FLAG_HIDDEN);
                 }
                 _anySlotReadySinceRebuild = true;
-                MAP_LOG("[MAP] slot %d z=%d x=%d y=%d -> READY visible=%s\n",
-                        idx, _zoom, tx, ty,
+                MAP_LOG("[MAP] slot %d z=%d x=%d y=%d -> READY gen=%lu visible=%s\n",
+                        idx, _zoom, tx, ty, (unsigned long)gen,
                         isInVisibleRange ? "yes" : "no");
             } else {
                 // No tile yet — hide the img so the placeholder shows.
@@ -804,6 +850,7 @@ void LvMapScreen::rebuildTiles() {
                         lv_obj_add_flag(s.img, LV_OBJ_FLAG_HIDDEN);
                     }
                     s.curDsc = nullptr;
+                    s.curGen = 0;
                 }
                 MAP_LOG("[MAP] slot %d z=%d x=%d y=%d -> placeholder (no dsc) visible=%s\n",
                         idx, _zoom, tx, ty,
@@ -873,6 +920,7 @@ void LvMapScreen::centerOnGpsIfAvailable() {
         _gps->longitude(), _gps->latitude(), _zoom);
     _centerWorldX = wp.x;
     _centerWorldY = wp.y;
+    clampCenterToWorld();
     // A new GPS-centered view gets its own 2.5s grace period before
     // the "no tiles" toast can fire.
     _noTilesToastPendingMs = 0;
@@ -939,12 +987,38 @@ void LvMapScreen::panBy(int32_t dxPx, int32_t dyPx) {
     if (dxPx == 0 && dyPx == 0) return;
     _centerWorldX += dxPx;
     _centerWorldY += dyPx;
+    clampCenterToWorld();
     // Any manual pan disables follow-GPS. (The 'c' key re-arms it.)
     _followGPS = false;
     // Reset the "no tiles" toast timer so a new view gets its own
     // 2.5s grace period before the toast can fire.
     _noTilesToastPendingMs = 0;
     _noTilesToastShown = false;
+}
+
+void LvMapScreen::clampCenterToWorld() {
+    // World is worldPx = TILE_PX * 2^zoom pixels square. Keep the viewport
+    // fully inside it where the world is big enough; otherwise (z0/z1 where
+    // the world is smaller than the 320x194 viewport) park the center on the
+    // world center so the tiles sit in the middle of the screen. Without
+    // this, zooming out (which scales the center by 2^-1) or panning past an
+    // edge left the center outside [0, worldPx) — every visible tile key was
+    // then out-of-world and the grid rendered gray/empty.
+    const int64_t worldPx = (int64_t)TILE_PX << _zoom;
+
+    if (worldPx > VIEW_W) {
+        if (_centerWorldX < VIEW_HALF_W)            _centerWorldX = VIEW_HALF_W;
+        if (_centerWorldX > worldPx - VIEW_HALF_W)  _centerWorldX = worldPx - VIEW_HALF_W;
+    } else {
+        _centerWorldX = worldPx / 2;
+    }
+
+    if (worldPx > VIEW_H) {
+        if (_centerWorldY < VIEW_HALF_H)            _centerWorldY = VIEW_HALF_H;
+        if (_centerWorldY > worldPx - VIEW_HALF_H)  _centerWorldY = worldPx - VIEW_HALF_H;
+    } else {
+        _centerWorldY = worldPx / 2;
+    }
 }
 
 void LvMapScreen::clampZoom() {
@@ -966,6 +1040,7 @@ void LvMapScreen::zoomIn() {
         _centerWorldX = (int64_t)((double)_centerWorldX * ratio);
         _centerWorldY = (int64_t)((double)_centerWorldY * ratio);
     }
+    clampCenterToWorld();
 
     _followGPS = false;
     _noTilesToastPendingMs = 0;
@@ -983,6 +1058,7 @@ void LvMapScreen::zoomOut() {
         _centerWorldX = (int64_t)((double)_centerWorldX * ratio);
         _centerWorldY = (int64_t)((double)_centerWorldY * ratio);
     }
+    clampCenterToWorld();
 
     _followGPS = false;
     _noTilesToastPendingMs = 0;

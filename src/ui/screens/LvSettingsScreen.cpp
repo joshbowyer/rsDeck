@@ -1314,13 +1314,20 @@ void LvSettingsScreen::refreshUI() {
     // from whenever the screen was last entered/edited. Skip while any
     // edit mode is active so we don't clobber an in-progress "< Bar >"-
     // style edit display.
+    //
+    // Only scan the *current* category: a global scan always finds Device/
+    // Diagnostics READONLY rows and rebuilt every category every second,
+    // which snapped focus back to stale _selectedIdx (browse mode only
+    // syncs that index on Enter) — LoRa Dev controls couldn't stay scrolled.
     if (_view == SettingsView::ITEM_LIST && !_editing && !_textEditing && !_freqEditing) {
         unsigned long now = millis();
         if (now - _lastReadonlyRefresh >= 1000) {
             _lastReadonlyRefresh = now;
             bool hasReadonly = false;
-            for (auto& item : _items) {
-                if (item.type == SettingType::READONLY) { hasReadonly = true; break; }
+            int end = constrain(_catRangeEnd, 0, (int)_items.size());
+            int start = constrain(_catRangeStart, 0, end);
+            for (int i = start; i < end; i++) {
+                if (_items[i].type == SettingType::READONLY) { hasReadonly = true; break; }
             }
             if (hasReadonly) rebuildItemList();
         }
@@ -1450,6 +1457,22 @@ void LvSettingsScreen::rebuildCategoryList() {
 
 void LvSettingsScreen::rebuildItemList() {
     if (!_scrollContainer) return;
+
+    // Browse mode lets the LVGL focus group move without updating
+    // _selectedIdx (that only syncs on Enter). Capture the live focus
+    // and scroll before destroying widgets so a periodic/refresh rebuild
+    // does not yank the user back to the top of the category.
+    if (!_editing && !_textEditing && !_freqEditing) {
+        lv_obj_t* focused = lv_group_get_focused(LvInput::group());
+        if (focused) {
+            int candidate = (int)(intptr_t)lv_obj_get_user_data(focused);
+            if (candidate >= _catRangeStart && candidate < _catRangeEnd) {
+                _selectedIdx = candidate;
+            }
+        }
+    }
+    lv_coord_t scrollY = lv_obj_get_scroll_y(_scrollContainer);
+
     _rowObjs.clear();
     _editValueLbl = nullptr;  // Invalidate cached label before destroying widgets
     lv_obj_clean(_scrollContainer);
@@ -1579,8 +1602,10 @@ void LvSettingsScreen::rebuildItemList() {
                 self->handleKey(tap);
             }, LV_EVENT_CLICKED, this);
             lv_group_add_obj(LvInput::group(), row);
+            // ANIM_OFF: periodic rebuild restores scrollY right after focus;
+            // an animated scroll_to_view would race and yank the list around.
             lv_obj_add_event_cb(row, [](lv_event_t* e) {
-                lv_obj_scroll_to_view(lv_event_get_target(e), LV_ANIM_ON);
+                lv_obj_scroll_to_view(lv_event_get_target(e), LV_ANIM_OFF);
             }, LV_EVENT_FOCUSED, nullptr);
         }
 
@@ -1674,7 +1699,14 @@ void LvSettingsScreen::rebuildItemList() {
     // Restore focus to the currently selected item after rebuild
     int focusOffset = _selectedIdx - _catRangeStart;
     if (focusOffset >= 0 && focusOffset < (int)_rowObjs.size()) {
+        // FOCUSED handler uses scroll_to_view; keep it off so we can restore
+        // the exact pre-rebuild scroll offset without a jump-to-top flash.
         lv_group_focus_obj(_rowObjs[focusOffset]);
+    }
+
+    if (scrollY > 0) {
+        lv_obj_update_layout(_scrollContainer);
+        lv_obj_scroll_to_y(_scrollContainer, scrollY, LV_ANIM_OFF);
     }
 }
 

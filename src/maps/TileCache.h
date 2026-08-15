@@ -141,7 +141,28 @@ public:
 
     // Returns a ready-to-use lv_img_dsc_t pointing into the slot's PSRAM
     // buffer if the tile is cached and READY, else nullptr.
-    const lv_img_dsc_t* getTileIfReady(const char* style, int z, int x, int y);
+    //
+    // IMPORTANT: the returned lv_img_dsc_t is PERMANENT per slot — its
+    // address never changes and its pixel buffer is reused when the slot is
+    // recycled for a different tile. A consumer that caches the pointer
+    // therefore CANNOT detect "same pointer, different tile". Pass outGen to
+    // read the slot's generation counter (bumped on every startDecode() /
+    // freeSlot()); re-bind + invalidate whenever (dsc, generation) changes,
+    // not just when the pointer changes. This is what fixed the "z0 tile
+    // rendered, vertically squished, inside a z1 grid cell" symptom.
+    const lv_img_dsc_t* getTileIfReady(const char* style, int z, int x, int y,
+                                       uint32_t* outGen = nullptr);
+
+    // ---- Pinning (on-screen protection) -------------------------------------
+    // A slot whose pinCount > 0 is never LRU-evicted, so its PSRAM buffer
+    // cannot be memset + overwritten by a new decode while an lv_img still
+    // points at it. Intended usage from the map screen, once per rebuild:
+    //   clearAllPins();
+    //   for each visible tile key: pinTile(style, z, x, y);
+    void clearAllPins();
+    // Pins the slot holding this key if it is READY or LOADING. Returns true
+    // if a slot was found and pinned.
+    bool pinTile(const char* style, int z, int x, int y);
 
     // Manually evict a tile (e.g. on memory pressure or zoom-out).
     void evict(const char* style, int z, int x, int y);
@@ -182,6 +203,23 @@ private:
         int32_t    pxW            = 0;       // pngle IHDR width
         int32_t    pxH            = 0;       // pngle IHDR height
         uint32_t   pixelsWritten  = 0;
+        // Bumped on every startDecode() and freeSlot(), i.e. every time the
+        // buffer's content identity is reset. `dsc` is permanent, so this is
+        // the ONLY way a UI consumer can tell that the pixels behind an
+        // already-attached descriptor now belong to a different tile.
+        // Wrapping at 2^32 is harmless (a wrap would need 4 billion decodes
+        // to land on the exact same value the UI last saw).
+        uint32_t   generation     = 0;
+        // >0 → slot is on screen; findLruEvictableSlot() must not take it.
+        uint8_t    pinCount       = 0;
+        // PNG → buffer downsample ratio. Set by onPngInit from IHDR:
+        //   1 = standard 256×256 source → 1:1 write to TILE_PX×TILE_PX buffer.
+        //   2 = 512×512 source (this mapset ships 512×512 PNGs on SD) → 2:1
+        //       nearest-neighbor downsample to the TILE_PX×TILE_PX buffer.
+        //   0 = invalid dims (neither 256×256 nor 512×512) — onPngDraw bails,
+        //       onPngDone frees the slot, EOF guard neg-caches it.
+        // Reset to 1 by startDecode() and freeSlot().
+        uint8_t    scale          = 1;
     };
     Slot _slots[SLOT_COUNT] = {};
 
@@ -213,6 +251,7 @@ private:
     // ---- Internal helpers ----
     void   ensurePool();                                          // allocate PSRAM lazily
     Slot*  findReadySlot(const char* style, int z, int x, int y);
+    Slot*  findSlotByKey(const char* style, int z, int x, int y);  // READY or LOADING
     Slot*  pickFreeSlot();                                        // or LRU-evict
     Slot*  pickLoadingSlot();                                     // for pump() continuation
     bool   startDecode(Slot& s, const char* style, int z, int x, int y);

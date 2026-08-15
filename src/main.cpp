@@ -44,6 +44,7 @@
 #include "storage/SDStore.h"
 #include "storage/MessageStore.h"
 #include "maps/TileCache.h"
+#include "maps/TileStore.h"
 #include "reticulum/ReticulumManager.h"
 #include "reticulum/AnnounceManager.h"
 #include "reticulum/LXMFManager.h"
@@ -998,11 +999,10 @@ static void printSerialHelp() {
 // =============================================================================
 // Tile-cache diagnostic (Stage 1 of offline-slippy-map feature)
 // =============================================================================
-// 'X' = list /maps/<mapset>/<x>/<y>/<z>.png on SD (x/y/z order — confirmed
-//       against the user's actual card) so the user can see what tiles exist
-//       and pick a (mapset,x,y,z) to test with 'x'.
-// 'x' = run a focused decode test: missing tile + guessed present tile;
-//       logs wall time, pump count, chunk latency, and first 8 RGB565 pixels.
+// 'X' = list /maps/<mapset>/… on SD and report detected path layout
+//       (z/x/y Meshtastic canonical vs x/y/z alternate — see TileStore.h).
+// 'x' = run a focused decode test: missing tile + non-colliding present tile;
+//       logs wall time, pump count, chunk latency, layout, first 8 RGB565 px.
 //
 // Extended (Bug 1 follow-up): per-zoom tile count + x/y range for each
 // mapset, so a user can confirm whether the SD has full-coverage tiles at
@@ -1184,15 +1184,31 @@ static void listSdMaps() {
 }
 
 static void runTileCacheTest() {
-    // Pick a guess for the present tile. If the user has already run 'X' and
-    // knows a real coord, they can edit TILE_GUESS below. The default targets
-    // the Basemapsxyz-OSM mapset at z=5/x=16/y/11 (a small low-zoom tile that
-    // is fast to decode). Note: on-disk path is /<mapset>/<x>/<y>/<z>.png
-    // (SD root, x/y/z order) — see TileStore.h; this struct's field order
-    // (style,z,x,y) is just the API parameter order, unrelated to path order.
+    // Non-colliding key: z1 tile (1,0). Paths differ by layout
+    //   z/x/y → /maps/<style>/1/1/0.png
+    //   x/y/z → /maps/<style>/1/0/1.png
+    // so this both loads a real tile and locks TileStore's sticky layout.
+    // (z0 0/0/0 and z1 1/1/1 are identical under both layouts — useless probes.)
     struct { const char* style; int z; int x; int y; } TILE_GUESS = {
-        "Basemapsxyz-OSM", 1, 1, 1
+        "Basemapsxyz-OSM", 1, 1, 0
     };
+    TileStore::resetLayoutDetection();
+    Serial.printf("[TILE-TEST] layout before probe: %s\n",
+                  TileStore::layoutName(TileStore::detectedLayout()));
+    {
+        // Explicit existence probe so serial shows which path hit.
+        const bool zxy = sdStore.exists(
+            TileStore::tilePathLayout(TileStore::Layout::ZXY,
+                                      TILE_GUESS.style, TILE_GUESS.z,
+                                      TILE_GUESS.x, TILE_GUESS.y).c_str());
+        const bool xyz = sdStore.exists(
+            TileStore::tilePathLayout(TileStore::Layout::XYZ,
+                                      TILE_GUESS.style, TILE_GUESS.z,
+                                      TILE_GUESS.x, TILE_GUESS.y).c_str());
+        Serial.printf("[TILE-TEST] probe z=%d x=%d y=%d  zxy=%s  xyz=%s\n",
+                      TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y,
+                      zxy ? "HIT" : "miss", xyz ? "HIT" : "miss");
+    }
     // ---- DEBUG: print queue state for diagnosing "enqueue failed" ----
     Serial.printf("[TILE-TEST] diag: queue head=%d tail=%d count=%d maxPumpMs=%lu\n",
                   tileCache.reqHead(), tileCache.reqTail(), tileCache.reqCount(),
@@ -1214,8 +1230,8 @@ static void runTileCacheTest() {
                   pumps, (unsigned long)elapsed, dscNeg ? "YES" : "no (good - never marked READY)");
 
     Serial.println("[TILE-TEST] === TEST 2: present tile (GUESS) ===");
-    Serial.printf("[TILE-TEST] guessing /maps/%s/%d/%d/%d.png\n",
-                  TILE_GUESS.style, TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y);
+    Serial.printf("[TILE-TEST] requesting logical z=%d x=%d y=%d (TileStore resolves path)\n",
+                  TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y);
     if (!tileCache.requestTile(TILE_GUESS.style, TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y, TileCache::Priority::PRIO_HIGH)) {
         Serial.println("[TILE-TEST] present: enqueue failed");
     }
@@ -1228,6 +1244,8 @@ static void runTileCacheTest() {
     }
     elapsed = millis() - t0;
     const lv_img_dsc_t* dsc = tileCache.getTileIfReady(TILE_GUESS.style, TILE_GUESS.z, TILE_GUESS.x, TILE_GUESS.y);
+    Serial.printf("[TILE-TEST] layout after open: %s\n",
+                  TileStore::layoutName(TileStore::detectedLayout()));
     if (dsc) {
         Serial.printf("[TILE-TEST] present: pumps=%d elapsed=%lu ms OK\n",
                       pumps, (unsigned long)elapsed);
